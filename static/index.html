@@ -36,9 +36,37 @@
       <article><span>运行模式</span><strong id="local-mode">real</strong></article>
       <article><span>dry_run_collect</span><strong id="local-dry-run">true</strong></article>
       <article class="danger"><span>no_publish</span><strong id="local-no-publish">true</strong></article>
+      <article><span>采集箱模式</span><strong id="local-collect-box-only">true</strong></article>
       <article><span>每轮上限</span><strong id="local-max-items">10</strong></article>
       <article><span>允许采集</span><strong id="local-allow-collect">true</strong></article>
       <article class="danger"><span>禁止发布</span><strong id="local-publish-forbidden">true</strong></article>
+    </section>
+
+    <section class="panel automation-console-panel" aria-labelledby="automation-console-title">
+      <div class="automation-console-heading">
+        <div>
+          <p class="eyebrow">AUTOMATION CONSOLE</p>
+          <h2 id="automation-console-title">自动化控制台</h2>
+        </div>
+        <div class="toolbar-actions automation-actions">
+          <button id="automation-start" class="button accent" type="button">开始自动找品采集</button>
+          <button id="automation-pause" class="button outline" type="button">暂停</button>
+          <button id="automation-resume" class="button outline" type="button">继续</button>
+          <button id="automation-stop" class="button outline danger-outline" type="button">停止</button>
+          <button id="automation-retry-failed" class="button dark" type="button">重试失败</button>
+        </div>
+      </div>
+      <div id="automation-console" class="automation-console"></div>
+      <div class="automation-console-columns">
+        <article>
+          <div class="mini-heading"><span>运行日志</span><button id="automation-refresh-logs" class="table-action" type="button">刷新</button></div>
+          <div id="automation-log-list" class="automation-log-list"></div>
+        </article>
+        <article>
+          <div class="mini-heading"><span>失败处理</span><button id="automation-refresh-failures" class="table-action" type="button">刷新</button></div>
+          <div id="automation-failure-list" class="automation-failure-list"></div>
+        </article>
+      </div>
     </section>
 
     <section class="panel environment-status-panel" aria-labelledby="environment-title">
@@ -151,7 +179,7 @@
             <button id="evaluate-selected" class="button outline" type="button">批量进入评分</button>
             <button id="skip-selected" class="button outline" type="button">标记跳过</button>
             <button id="delete-invalid" class="button outline danger-outline" type="button">删除无效</button>
-            <button id="collect-qualified" class="button accent" type="button">采集达标商品</button>
+            <button id="collect-qualified" class="button accent" type="button">放入妙手采集箱</button>
           </div>
         </div>
         <div class="candidate-queue-bar">
@@ -216,6 +244,10 @@
         <div id="publish-results-center" class="publish-results-center"></div>
       </article>
       <article class="panel table-panel">
+        <div class="table-toolbar"><div><p class="eyebrow">MIAOSHOU BOX</p><h2>妙手采集箱记录</h2></div></div>
+        <div id="miaoshou-box-records" class="run-list"></div>
+      </article>
+      <article class="panel table-panel">
         <div class="table-toolbar"><div><p class="eyebrow">AUTOMATION QUEUE</p><h2>自动化任务</h2></div><button id="refresh-runs" class="button outline" type="button">刷新状态</button></div>
         <div id="run-list" class="run-list"></div>
       </article>
@@ -251,6 +283,7 @@
           <label><span>1688入口</span><input name="automation.alibaba_url"></label>
           <label><span>妙手插件解压目录</span><input name="automation.plugin_unpack_dir" placeholder="启动专用Chrome后在扩展页加载此目录"></label>
           <label><span>妙手插件扩展ID（可选）</span><input name="automation.plugin_extension_id" placeholder="用于准确识别官方插件"></label>
+          <label><span>妙手采集箱安全配方（JSON）</span><textarea name="automation.miaoshou_box_recipe" rows="5" placeholder='[{"type":"navigate","url":"https://...","label":"打开妙手采集箱"}]'></textarea></label>
           <label><span>采集箱认领动作配方（JSON）</span><textarea name="automation.collection_recipe" rows="5" placeholder='[{"type":"navigate","url":"https://...","label":"打开公用采集箱"}]'></textarea></label>
           <label><span>链接采集兜底配方（JSON）</span><textarea name="automation.link_collection_recipe" rows="5" placeholder='[{"type":"navigate","url":"https://..."},{"type":"fill","selector":"textarea","value":"{{sourceUrl}}"}]'></textarea></label>
           <label><span>发布动作配方（JSON）</span><textarea name="automation.publish_recipe" rows="8" placeholder='[{"type":"fill","selector":"input[name=title]","value":"{{title}}","phase":"prepare"}]'></textarea></label>

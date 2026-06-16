@@ -28,6 +28,7 @@ from lib.keychain import get_secret, set_secret
 from lib.local_config import config_status, ensure_local_runtime, load_config, load_or_create_token, save_config
 from lib.prompts import PRESETS, build_prompts
 from lib.real1688_adapter import Real1688Adapter, SOURCING_ACTIVE_STATUSES
+from lib.real_miaoshou_adapter import RealMiaoshouAdapter
 from lib.text_gateway import TextGatewayError, localize
 from lib.title_cleaner import TitleCleaner
 
@@ -41,12 +42,15 @@ DB = Database(DATA_DIR / "workbench.db")
 AUTOMATION = AutomationEngine(DB, DATA_DIR)
 BROWSER = BrowserManager(DB, DATA_DIR)
 SOURCING = Real1688Adapter(DB, DATA_DIR, BROWSER)
+MIAOSHOU = RealMiaoshouAdapter(DB, DATA_DIR, BROWSER)
 TITLE_CLEANER = TitleCleaner()
 WORKBENCH_TOKEN = load_or_create_token(DATA_DIR)
 RUN_LOCK = threading.Lock()
 ACTIVE_RUNS = set()
 SOURCING_LOCK = threading.Lock()
 ACTIVE_SOURCING_RUNS = set()
+PIPELINE_LOCK = threading.Lock()
+ACTIVE_PIPELINE_RUNS = set()
 GENERATION_LOCK = threading.Lock()
 ACTIVE_GENERATIONS = set()
 GENERATION_SLOTS = threading.BoundedSemaphore(max(1, int(DB.setting("image.concurrency", 2))))
@@ -76,6 +80,32 @@ COLLECTION_QUEUE_DEFINITIONS = [
     ("failed", "采集失败"),
     ("manual", "需人工处理"),
 ]
+
+PIPELINE_STEPS = [
+    ("search", "搜索", 10),
+    ("save_candidate", "保存候选", 20),
+    ("dedupe", "去重", 30),
+    ("precheck", "风险预检", 40),
+    ("title_clean", "标题清洗", 55),
+    ("image_check", "图片检查", 70),
+    ("miaoshou_collect", "妙手采集", 90),
+    ("collected_to_box", "进入采集箱", 100),
+]
+
+PIPELINE_STEP_PROGRESS = {key: progress for key, _label, progress in PIPELINE_STEPS}
+PIPELINE_STEP_LABELS = {key: label for key, label, _progress in PIPELINE_STEPS}
+PIPELINE_ACTIVE_STATUSES = {"queued", "running", "starting", "waiting_for_manual"}
+PIPELINE_COUNTER_DEFAULTS = {
+    "foundCount": 0,
+    "savedCandidates": 0,
+    "duplicateSkipped": 0,
+    "riskBlocked": 0,
+    "lowPrioritySkipped": 0,
+    "titleCleaned": 0,
+    "imageReady": 0,
+    "collectedToBox": 0,
+    "failed": 0,
+}
 
 DEDUPE_STATUS_LABELS = {
     "new_candidate": "新候选",
@@ -173,6 +203,7 @@ def initialize():
     ensure_local_runtime(DATA_DIR)
     SOURCING.dedupe_callback = lambda candidate_ids: dedupe_candidates(candidate_ids)
     SOURCING.precheck_callback = lambda candidate_ids: precheck_candidates(candidate_ids)
+    MIAOSHOU.candidate_summary = lambda candidate: candidate_summary(candidate)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
     apply_config_to_settings()
     DB.migrate_products_json(DATA_DIR / "products.json")
@@ -894,6 +925,7 @@ def candidate_summary(candidate):
         and not candidate["duplicateSkipped"]
         and precheck_status == "precheck_passed"
         and candidate["imageReady"]
+        and not candidate.get("collected_at")
     )
     candidate["queue"] = candidate_queue(candidate)
     candidate["workflowStatus"] = get_candidate_workflow_status(candidate)
@@ -960,7 +992,9 @@ def get_candidate_workflow_status(candidate):
                 next_action="图片自动判断",
                 detail=IMAGE_STATUS_LABELS.get(image_status, "图片待处理"),
             )
-        return workflow_status("candidate_collectable", next_action="采集达标商品", detail="达标 %d 国" % len(market_summary.get("collectableMarkets") or []))
+        if candidate.get("collected_at"):
+            return workflow_status("product_collected", next_action="查看采集箱记录", detail="已进入妙手采集箱")
+        return workflow_status("candidate_collectable", next_action="放入妙手采集箱", detail="达标 %d 国" % len(market_summary.get("collectableMarkets") or []))
     return workflow_status("candidate_scored", blocked=True, next_action="人工复核或跳过", detail="无可采集国家")
 
 
@@ -1270,9 +1304,9 @@ def history_dedupe_indexes():
             if clean_title_for_dedupe(item.get("clean_title"))
         },
         "box_by_image": {
-            image_fingerprint(item.get("image_status")): item
+            image_fingerprint((item.get("images_used") or [item.get("source_url") or ""])[0]): item
             for item in collection_box_records
-            if image_fingerprint(item.get("image_status"))
+            if image_fingerprint((item.get("images_used") or [item.get("source_url") or ""])[0])
         },
         "run_by_url": {
             normalize_source_url_for_dedupe((run.get("context") or {}).get("url") or run.get("context", {}).get("sourceUrl") or ""): run
@@ -2534,6 +2568,7 @@ def register_collection_box_record(candidate, run=None, product=None):
         "source_url": candidate.get("source_url") or "",
         "clean_title": clean_title,
         "image_status": candidate_image_status(candidate),
+        "images_used": candidate.get("local_images") or candidate.get("images") or [],
         "collected_at": collected_at,
         "miaoshou_status": (product or {}).get("status") or candidate.get("status") or "",
         "run_id": (run or {}).get("id") or "",
@@ -2734,11 +2769,513 @@ def enqueue_sourcing_run(run_id):
     return True
 
 
+def pipeline_default_context():
+    return {
+        "sourcingRunId": "",
+        "currentKeyword": "",
+        "currentPage": 0,
+        "currentCandidateId": "",
+        "currentProduct": "",
+        "currentStepKey": "search",
+        "currentStep": PIPELINE_STEP_LABELS["search"],
+        "totalProgress": 0,
+        "itemProgress": 0,
+        "requestedStop": False,
+        "requestedPause": False,
+        "phase": "automation_console",
+        "counters": dict(PIPELINE_COUNTER_DEFAULTS),
+    }
+
+
+def pipeline_steps_payload(current_key="search", completed_keys=None, failed_key=""):
+    completed_keys = set(completed_keys or [])
+    payload = []
+    current_seen = False
+    for key, label, progress in PIPELINE_STEPS:
+        status = "pending"
+        if key in completed_keys:
+            status = "completed"
+        elif key == failed_key:
+            status = "failed"
+        elif key == current_key and not current_seen:
+            status = "running"
+            current_seen = True
+        payload.append({"key": key, "label": label, "progress": progress, "status": status})
+    return payload
+
+
+def latest_pipeline_run():
+    return DB.row("SELECT * FROM automation_runs WHERE kind='pipeline' ORDER BY created_at DESC LIMIT 1")
+
+
+def active_pipeline_run():
+    run = latest_pipeline_run()
+    if run and run.get("status") in PIPELINE_ACTIVE_STATUSES:
+        return run
+    return None
+
+
+def pipeline_counters():
+    candidates = [candidate_summary(item) for item in DB.list_candidates()]
+    sourcing = SOURCING.current()
+    collection_records = DB.list_collection_box_records() if hasattr(DB, "list_collection_box_records") else []
+    failed_collection = DB.rows("SELECT id FROM automation_runs WHERE kind='collection' AND status IN ('failed','blocked')")
+    failed_logs = DB.rows("SELECT id FROM automation_logs WHERE status='failed' AND resolution=''")
+    return {
+        "foundCount": int((sourcing or {}).get("found_count") or len(candidates)),
+        "savedCandidates": len(candidates),
+        "duplicateSkipped": sum(1 for item in candidates if item.get("duplicateSkipped")),
+        "riskBlocked": sum(1 for item in candidates if item.get("precheckStatus") == "risk_blocked"),
+        "lowPrioritySkipped": sum(1 for item in candidates if item.get("precheckStatus") == "low_priority_skipped"),
+        "titleCleaned": sum(1 for item in candidates if item.get("cleanTitle")),
+        "imageReady": sum(1 for item in candidates if item.get("imageReady")),
+        "collectedToBox": len(collection_records),
+        "failed": len(failed_collection) + len(failed_logs),
+    }
+
+
+def pipeline_context(run):
+    context = dict(pipeline_default_context())
+    context.update((run or {}).get("context") or {})
+    context["counters"] = {**dict(PIPELINE_COUNTER_DEFAULTS), **(context.get("counters") or {}), **pipeline_counters()}
+    sourcing_run_id = context.get("sourcingRunId") or ""
+    if sourcing_run_id:
+        sourcing = DB.get_sourcing_run(sourcing_run_id) or {}
+    else:
+        sourcing = SOURCING.current() or {}
+        if sourcing.get("run_id"):
+            context["sourcingRunId"] = sourcing.get("run_id")
+    context["currentKeyword"] = context.get("currentKeyword") or sourcing.get("current_keyword") or ""
+    context["currentPage"] = int(context.get("currentPage") or sourcing.get("current_page") or 0)
+    return context
+
+
+def save_pipeline_context(run_id, **updates):
+    run = DB.get_run(run_id)
+    context = pipeline_context(run)
+    context.update(updates)
+    counters = context.get("counters") or {}
+    context["counters"] = {**dict(PIPELINE_COUNTER_DEFAULTS), **counters}
+    return DB.update_run(run_id, context=context, current_step=context.get("currentStep") or "")
+
+
+def pipeline_log(run_or_id, current_step, status, message="", candidate=None, error="", screenshot="", current_url="", details=None, keyword=""):
+    run = DB.get_run(run_or_id) if isinstance(run_or_id, str) else run_or_id
+    context = pipeline_context(run)
+    candidate = candidate or {}
+    return DB.save_automation_log({
+        "run_id": (run or {}).get("id") or "",
+        "sourcing_run_id": context.get("sourcingRunId") or "",
+        "candidate_id": candidate.get("id") or context.get("currentCandidateId") or "",
+        "product": candidate_display_title(candidate) or candidate.get("title") or context.get("currentProduct") or "",
+        "keyword": keyword or candidate.get("keyword") or context.get("currentKeyword") or "",
+        "current_step": current_step,
+        "status": status,
+        "message": message,
+        "error": error,
+        "screenshot": screenshot,
+        "current_url": current_url or candidate.get("source_url") or "",
+        "details": details or {},
+    })
+
+
+def pipeline_update_step(run_id, step_key, candidate=None, status="running", message="", extra=None):
+    candidate = candidate or {}
+    step_label = PIPELINE_STEP_LABELS.get(step_key, step_key)
+    context_updates = {
+        "currentStepKey": step_key,
+        "currentStep": step_label,
+        "currentCandidateId": candidate.get("id") or "",
+        "currentProduct": candidate_display_title(candidate) or candidate.get("title") or "",
+        "itemProgress": PIPELINE_STEP_PROGRESS.get(step_key, 0),
+        "totalProgress": max(0, min(100, PIPELINE_STEP_PROGRESS.get(step_key, 0))),
+    }
+    if extra:
+        context_updates.update(extra)
+    run = save_pipeline_context(run_id, **context_updates)
+    DB.update_run(run_id, status="running", current_step=step_label)
+    pipeline_log(run, step_label, status, message=message, candidate=candidate, details={"stepKey": step_key, **(extra or {})})
+    return DB.get_run(run_id)
+
+
+def pipeline_should_stop(run_id):
+    run = DB.get_run(run_id)
+    if not run:
+        return True
+    context = (run.get("context") or {})
+    return run.get("status") == "stopped" or bool(context.get("requestedStop"))
+
+
+def pipeline_should_pause(run_id):
+    run = DB.get_run(run_id)
+    if not run:
+        return False
+    context = (run.get("context") or {})
+    return run.get("status") == "waiting_for_manual" or bool(context.get("requestedPause"))
+
+
+def candidates_for_pipeline():
+    return [
+        candidate_summary(item)
+        for item in DB.list_candidates()
+        if not candidate_is_skipped(item) and not candidate_is_duplicate_skipped(item) and not item.get("collected_at")
+    ]
+
+
+def pipeline_process_candidates(run_id, only_failed=False):
+    processed = 0
+    for candidate in candidates_for_pipeline():
+        if pipeline_should_stop(run_id) or pipeline_should_pause(run_id):
+            break
+        candidate = DB.get_candidate(candidate["id"])
+        if not candidate:
+            continue
+        summary = candidate_summary(candidate)
+        if only_failed:
+            failed_signals = (
+                summary.get("precheckStatus") in ("precheck_failed", "needs_title_clean", "needs_image_check")
+                or summary.get("imageStatus") == "image_failed"
+            )
+            if not failed_signals:
+                continue
+
+        pipeline_update_step(run_id, "dedupe", candidate, message="检查候选是否重复")
+        dedupe = dedupe_candidates([candidate["id"]])
+        candidate = DB.get_candidate(candidate["id"])
+        summary = candidate_summary(candidate)
+        if summary.get("duplicateSkipped"):
+            pipeline_log(DB.get_run(run_id), "去重", "skipped", "重复候选已跳过", candidate, details=dedupe)
+            processed += 1
+            continue
+
+        pipeline_update_step(run_id, "precheck", candidate, message="执行风险和基础上传检查")
+        precheck = precheck_candidates([candidate["id"]])
+        candidate = DB.get_candidate(candidate["id"])
+        summary = candidate_summary(candidate)
+        if summary.get("precheckStatus") == "risk_blocked":
+            pipeline_log(DB.get_run(run_id), "风险预检", "blocked", summary.get("precheckReason") or "风险阻断", candidate, details=precheck)
+            processed += 1
+            continue
+        if summary.get("precheckStatus") == "low_priority_skipped":
+            pipeline_log(DB.get_run(run_id), "风险预检", "skipped", summary.get("precheckReason") or "低优先级跳过", candidate, details=precheck)
+            processed += 1
+            continue
+
+        if not summary.get("cleanTitle") or summary.get("titleNeedsClean"):
+            pipeline_update_step(run_id, "title_clean", candidate, message="清洗商品标题")
+            title_result = clean_titles_for_candidates([candidate["id"]])
+            candidate = DB.get_candidate(candidate["id"])
+            summary = candidate_summary(candidate)
+            if title_result.get("blocked"):
+                pipeline_log(DB.get_run(run_id), "标题清洗", "failed", "标题清洗失败", candidate, error=title_result["blocked"][0].get("error"), details=title_result)
+                processed += 1
+                continue
+
+        pipeline_update_step(run_id, "precheck", candidate, message="复查上传基础要求")
+        precheck = precheck_candidates([candidate["id"]])
+        candidate = DB.get_candidate(candidate["id"])
+        summary = candidate_summary(candidate)
+        if summary.get("precheckStatus") != "precheck_passed":
+            status = "blocked" if summary.get("precheckStatus") in ("precheck_failed", "risk_blocked") else "skipped"
+            pipeline_log(DB.get_run(run_id), "风险预检", status, summary.get("precheckReason") or "预检未通过", candidate, details=precheck)
+            processed += 1
+            continue
+
+        pipeline_update_step(run_id, "image_check", candidate, message="下载并判断商品图片")
+        image_result = auto_process_candidate_images([candidate["id"]])
+        candidate = DB.get_candidate(candidate["id"])
+        summary = candidate_summary(candidate)
+        if not summary.get("imageReady"):
+            blocked = image_result.get("blocked") or []
+            pipeline_log(
+                DB.get_run(run_id),
+                "图片检查",
+                "failed",
+                "图片未达标，暂不进入妙手采集箱",
+                candidate,
+                error=(blocked[0].get("error") if blocked else summary.get("imageReason") or "图片未就绪"),
+                details=image_result,
+            )
+            processed += 1
+            continue
+
+        pipeline_update_step(run_id, "miaoshou_collect", candidate, message="放入妙手采集箱")
+        collect_result = MIAOSHOU.collect_ready([candidate["id"]])
+        candidate = DB.get_candidate(candidate["id"])
+        if collect_result.get("items"):
+            pipeline_update_step(run_id, "collected_to_box", candidate, status="completed", message="已进入妙手采集箱/待处理区")
+        else:
+            blocked = collect_result.get("blocked") or []
+            diagnostics = (blocked[0].get("diagnostics") if blocked else {}) or {}
+            pipeline_log(
+                DB.get_run(run_id),
+                "妙手采集",
+                "failed" if blocked else "blocked",
+                "妙手采集箱流程未完成",
+                candidate,
+                error=(blocked[0].get("error") if blocked else "无合格候选进入采集箱"),
+                screenshot=diagnostics.get("screenshot") or "",
+                current_url=diagnostics.get("currentUrl") or "",
+                details=collect_result,
+            )
+        processed += 1
+    return processed
+
+
+def execute_pipeline_run(run_id, retry_failed=False):
+    run = DB.get_run(run_id)
+    if not run:
+        with PIPELINE_LOCK:
+            ACTIVE_PIPELINE_RUNS.discard(run_id)
+        return
+    try:
+        DB.update_run(run_id, status="running", error="", resolution="")
+        save_pipeline_context(run_id, requestedPause=False, requestedStop=False)
+        pipeline_update_step(run_id, "search", message="启动真实 1688 搜索找品")
+        if not retry_failed:
+            sourcing_run = SOURCING.start_run()
+            save_pipeline_context(run_id, sourcingRunId=sourcing_run["run_id"])
+            enqueue_sourcing_run(sourcing_run["run_id"])
+            while True:
+                sourcing_run = DB.get_sourcing_run(sourcing_run["run_id"]) or sourcing_run
+                save_pipeline_context(
+                    run_id,
+                    currentKeyword=sourcing_run.get("current_keyword") or "",
+                    currentPage=int(sourcing_run.get("current_page") or 0),
+                    counters=pipeline_counters(),
+                    totalProgress=PIPELINE_STEP_PROGRESS["search"] if sourcing_run.get("status") not in ("completed",) else PIPELINE_STEP_PROGRESS["save_candidate"],
+                )
+                if sourcing_run.get("status") in ("completed", "failed", "stopped", "waiting_for_manual"):
+                    break
+                if pipeline_should_stop(run_id) or pipeline_should_pause(run_id):
+                    SOURCING.pause()
+                    break
+                time.sleep(1)
+            if sourcing_run.get("status") == "waiting_for_manual" or pipeline_should_pause(run_id):
+                DB.update_run(run_id, status="waiting_for_manual", current_step="等待人工处理", error=sourcing_run.get("error") or "用户暂停")
+                pipeline_log(DB.get_run(run_id), "等待人工处理", "waiting_for_manual", sourcing_run.get("error") or "等待人工处理")
+                return
+            if sourcing_run.get("status") == "stopped" or pipeline_should_stop(run_id):
+                DB.update_run(run_id, status="stopped", current_step="已停止", error=sourcing_run.get("error") or "用户停止")
+                pipeline_log(DB.get_run(run_id), "停止", "stopped", "运行已停止")
+                return
+            if sourcing_run.get("status") == "failed":
+                DB.update_run(run_id, status="failed", current_step="搜索", error=sourcing_run.get("error") or "真实 1688 搜索失败")
+                pipeline_log(DB.get_run(run_id), "搜索", "failed", "真实 1688 搜索失败", error=sourcing_run.get("error") or "")
+                return
+            pipeline_update_step(run_id, "save_candidate", message="真实候选已保存到候选池")
+
+        pipeline_process_candidates(run_id, only_failed=retry_failed)
+        if pipeline_should_stop(run_id):
+            DB.update_run(run_id, status="stopped", current_step="已停止", error="用户停止")
+            pipeline_log(DB.get_run(run_id), "停止", "stopped", "运行已停止")
+            return
+        if pipeline_should_pause(run_id):
+            DB.update_run(run_id, status="waiting_for_manual", current_step="等待人工处理", error="用户暂停")
+            pipeline_log(DB.get_run(run_id), "等待人工处理", "waiting_for_manual", "用户暂停")
+            return
+        counters = pipeline_counters()
+        final_status = "completed"
+        current_step = "进入采集箱" if counters["collectedToBox"] else "处理完成"
+        DB.update_run(
+            run_id,
+            status=final_status,
+            current_step=current_step,
+            steps=pipeline_steps_payload("collected_to_box", completed_keys=[key for key, _label, _progress in PIPELINE_STEPS]),
+            context={**pipeline_context(DB.get_run(run_id)), "counters": counters, "totalProgress": 100, "itemProgress": 100, "currentStep": current_step},
+            error="",
+        )
+        pipeline_log(DB.get_run(run_id), current_step, "completed", "自动找品采集流程完成", details={"counters": counters})
+    except Exception as exc:
+        screenshot = ""
+        try:
+            screenshot = BROWSER.screenshot()
+        except Exception:
+            pass
+        current_url = ""
+        try:
+            current_url = BROWSER.status().get("current_url") or ""
+        except Exception:
+            pass
+        run = DB.get_run(run_id) or run
+        diagnostics = {
+            "failedStep": (run or {}).get("current_step") or "自动化控制台",
+            "error": str(exc),
+            "currentUrl": current_url,
+            "screenshot": screenshot,
+            "clickableText": [],
+            "suggestedActions": ["查看运行日志和当前页面后重试失败任务"],
+        }
+        DB.update_run(run_id, status="failed", error=str(exc), screenshot=screenshot, diagnostics=diagnostics)
+        pipeline_log(DB.get_run(run_id), diagnostics["failedStep"], "failed", "自动化控制台执行失败", error=str(exc), screenshot=screenshot, current_url=current_url, details={"diagnostics": diagnostics})
+    finally:
+        with PIPELINE_LOCK:
+            ACTIVE_PIPELINE_RUNS.discard(run_id)
+
+
+def enqueue_pipeline_run(run_id, retry_failed=False):
+    with PIPELINE_LOCK:
+        if run_id in ACTIVE_PIPELINE_RUNS:
+            return False
+        ACTIVE_PIPELINE_RUNS.add(run_id)
+    threading.Thread(
+        target=execute_pipeline_run,
+        args=(run_id, retry_failed),
+        daemon=True,
+        name="pipeline-run-" + run_id[:8],
+    ).start()
+    return True
+
+
+def create_pipeline_run(retry_failed=False):
+    active = active_pipeline_run()
+    if active and not retry_failed:
+        return active
+    context = pipeline_default_context()
+    context["retryFailed"] = bool(retry_failed)
+    run = DB.create_run(
+        "pipeline",
+        pipeline_steps_payload("search"),
+        status="queued",
+        context=context,
+    )
+    pipeline_log(run, "创建运行", "queued", "已创建自动找品采集运行")
+    return run
+
+
+def automation_current_status():
+    run = latest_pipeline_run()
+    sourcing = sourcing_current_status()
+    context = pipeline_context(run) if run else pipeline_default_context()
+    status = run.get("status") if run else "idle"
+    counters = context.get("counters") or pipeline_counters()
+    total_target = max(1, int(workbench_config().get("max_items_per_run") or 10))
+    processed_estimate = min(total_target, max(
+        counters.get("savedCandidates", 0),
+        counters.get("duplicateSkipped", 0) + counters.get("riskBlocked", 0) + counters.get("lowPrioritySkipped", 0) + counters.get("collectedToBox", 0),
+    ))
+    total_progress = int(context.get("totalProgress") or 0)
+    if status == "completed":
+        total_progress = 100
+    elif processed_estimate:
+        step_floor = int(context.get("itemProgress") or 0)
+        total_progress = max(total_progress, min(99, round(processed_estimate / total_target * 100 * 0.6 + step_floor * 0.4)))
+    return {
+        "run": run,
+        "status": status,
+        "active": bool(run and run.get("id") in ACTIVE_PIPELINE_RUNS),
+        "runId": (run or {}).get("id") or "",
+        "sourcingRunId": context.get("sourcingRunId") or "",
+        "currentKeyword": context.get("currentKeyword") or "",
+        "currentPage": int(context.get("currentPage") or 0),
+        "currentCandidateId": context.get("currentCandidateId") or "",
+        "currentProduct": context.get("currentProduct") or "",
+        "currentStep": context.get("currentStep") or ((run or {}).get("current_step") or ""),
+        "currentStepKey": context.get("currentStepKey") or "",
+        "totalProgress": max(0, min(100, total_progress)),
+        "itemProgress": max(0, min(100, int(context.get("itemProgress") or 0))),
+        "steps": pipeline_steps_payload(context.get("currentStepKey") or "search"),
+        "counters": counters,
+        "sourcing": sourcing,
+        "config": config_status(workbench_config()),
+        "error": (run or {}).get("error") or "",
+        "updatedAt": (run or {}).get("updated_at"),
+    }
+
+
+def automation_start():
+    run = create_pipeline_run()
+    enqueue_pipeline_run(run["id"])
+    return automation_current_status()
+
+
+def automation_pause():
+    run = latest_pipeline_run()
+    if not run:
+        run = create_pipeline_run()
+    save_pipeline_context(run["id"], requestedPause=True)
+    SOURCING.pause()
+    DB.update_run(run["id"], status="waiting_for_manual", current_step="等待人工处理", error="用户暂停")
+    pipeline_log(DB.get_run(run["id"]), "等待人工处理", "waiting_for_manual", "用户暂停")
+    return automation_current_status()
+
+
+def automation_resume():
+    run = latest_pipeline_run()
+    if not run:
+        run = create_pipeline_run()
+    save_pipeline_context(run["id"], requestedPause=False, requestedStop=False)
+    DB.update_run(run["id"], status="queued", current_step="继续运行", error="")
+    enqueue_pipeline_run(run["id"])
+    return automation_current_status()
+
+
+def automation_stop():
+    run = latest_pipeline_run()
+    if not run:
+        run = create_pipeline_run()
+    save_pipeline_context(run["id"], requestedStop=True, requestedPause=False)
+    SOURCING.stop()
+    DB.update_run(run["id"], status="stopped", current_step="已停止", error="用户停止")
+    pipeline_log(DB.get_run(run["id"]), "停止", "stopped", "用户停止")
+    return automation_current_status()
+
+
+def automation_retry_failed():
+    run = create_pipeline_run(retry_failed=True)
+    enqueue_pipeline_run(run["id"], retry_failed=True)
+    for failure in automation_failures()["items"]:
+        if failure.get("source") == "automation_log":
+            DB.update_automation_log(failure["id"], resolution="retrying")
+    return automation_current_status()
+
+
+def automation_logs(limit=100, run_id=""):
+    return {"items": DB.list_automation_logs(run_id=run_id, limit=limit)}
+
+
+def automation_log_failure_task(log):
+    details = log.get("details") or {}
+    return failure_task(
+        "automation_log",
+        log["id"],
+        "自动化流程失败",
+        log.get("error") or log.get("message") or "自动化流程失败",
+        product=log.get("product") or "",
+        productId=log.get("candidate_id") or "",
+        currentStep=log.get("current_step") or "",
+        screenshot=log.get("screenshot") or "",
+        currentUrl=log.get("current_url") or "",
+        attempts=details.get("attempts") or 0,
+        lastFailedAt=log.get("created_at"),
+        suggestedActions=details.get("suggestedActions") or ["查看当前页面和运行日志后重试"],
+        actions=["retry", "skip", "mark_handled", "details", "copy"],
+        resolution=log.get("resolution") or "",
+        runId=log.get("run_id") or "",
+    )
+
+
+def automation_failures():
+    existing = publish_results_summary()["failures"]
+    log_failures = [
+        automation_log_failure_task(log)
+        for log in DB.rows(
+            "SELECT * FROM automation_logs WHERE status IN ('failed','blocked') AND resolution='' ORDER BY created_at DESC LIMIT 50"
+        )
+    ]
+    items = log_failures + existing
+    items.sort(key=lambda item: item.get("lastFailedAt") or 0, reverse=True)
+    return {"items": items[:80], "count": len(items)}
+
+
 def recover_background_jobs():
     for job in DB.rows("SELECT id FROM generation_jobs WHERE status='queued'"):
         enqueue_generation(job["id"])
-    for run in DB.rows("SELECT id FROM automation_runs WHERE status='queued'"):
-        enqueue_automation_run(run["id"])
+    for run in DB.rows("SELECT id,kind FROM automation_runs WHERE status='queued'"):
+        if run.get("kind") == "pipeline":
+            enqueue_pipeline_run(run["id"])
+        else:
+            enqueue_automation_run(run["id"])
     for run in DB.rows(
         "SELECT run_id FROM sourcing_runs WHERE status IN (%s)" % ",".join("?" for _ in SOURCING_ACTIVE_STATUSES),
         tuple(SOURCING_ACTIVE_STATUSES),
@@ -3393,6 +3930,19 @@ def resolve_failure_task(payload):
         elif action == "manual":
             DB.update_run(run["id"], resolution="manual")
         return DB.get_run(item_id)
+    if source == "automation_log":
+        log = DB.row("SELECT * FROM automation_logs WHERE id=?", (item_id,))
+        if not log:
+            raise ValueError("失败日志不存在")
+        if action == "retry":
+            DB.update_automation_log(item_id, resolution="retrying")
+            return automation_retry_failed()
+        if action == "skip":
+            return DB.update_automation_log(item_id, resolution="skipped")
+        if action == "mark_handled":
+            return DB.update_automation_log(item_id, resolution="handled")
+        if action == "manual":
+            return DB.update_automation_log(item_id, resolution="manual")
     if source == "generation_job":
         if action == "retry":
             return retry_generation_job(item_id)
@@ -3625,6 +4175,10 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.send_json(BROWSER.status())
         if path == "/api/platform/status":
             return self.send_json(BROWSER.platform_status())
+        if path == "/api/miaoshou/status":
+            return self.send_json(MIAOSHOU.status())
+        if path == "/api/miaoshou/collection-box-records":
+            return self.send_json({"items": DB.list_collection_box_records()})
         if path == "/api/sourcing/current":
             return self.send_json(sourcing_current_status())
         if path == "/api/dashboard":
@@ -3731,6 +4285,15 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.send_json(values)
         if path == "/api/automation/preflight":
             return self.send_json(AUTOMATION.preflight())
+        if path == "/api/automation/current":
+            return self.send_json(automation_current_status())
+        if path == "/api/automation/logs":
+            query = parse_qs(parsed.query)
+            limit = int((query.get("limit") or ["100"])[0] or 100)
+            run_id = (query.get("runId") or [""])[0]
+            return self.send_json(automation_logs(limit=limit, run_id=run_id))
+        if path == "/api/automation/failures":
+            return self.send_json(automation_failures())
         if path == "/api/selfcheck":
             return self.send_json(system_selfcheck())
         if path == "/api/export.csv":
@@ -3796,6 +4359,21 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if path == "/api/browser/restart":
             return self.send_json(BROWSER.restart())
+
+        if path == "/api/automation/start":
+            return self.send_json(automation_start(), HTTPStatus.CREATED)
+
+        if path == "/api/automation/pause":
+            return self.send_json(automation_pause())
+
+        if path == "/api/automation/resume":
+            return self.send_json(automation_resume())
+
+        if path == "/api/automation/stop":
+            return self.send_json(automation_stop())
+
+        if path == "/api/automation/retry-failed":
+            return self.send_json(automation_retry_failed())
 
         if path == "/api/sourcing/start":
             run = SOURCING.start_run()
@@ -3925,6 +4503,12 @@ class AppHandler(BaseHTTPRequestHandler):
             if response["blocked"] and not response["items"]:
                 return self.send_json(response, HTTPStatus.BAD_REQUEST)
             return self.send_json(response)
+
+        if path == "/api/miaoshou/collect-ready":
+            response = MIAOSHOU.collect_ready(candidate_ids_from_payload(payload))
+            if response["blocked"] and not response["items"]:
+                return self.send_json(response, HTTPStatus.BAD_REQUEST)
+            return self.send_json(response, HTTPStatus.CREATED if response["items"] else HTTPStatus.OK)
 
         if path == "/api/products/clean-title":
             ids = candidate_ids_from_payload(payload)
@@ -4122,6 +4706,9 @@ class AppHandler(BaseHTTPRequestHandler):
             api_key = values.pop("image.api_key", "")
             if api_key:
                 set_secret(api_key)
+            box_recipe = values.get("automation.miaoshou_box_recipe")
+            if box_recipe is not None:
+                AUTOMATION.ensure_publish_allowed(box_recipe, "妙手采集箱安全配方")
             recipe = values.get("automation.publish_recipe")
             if recipe is not None:
                 AUTOMATION.ensure_publish_allowed(recipe, "发布动作配方")

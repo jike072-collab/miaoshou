@@ -1,6 +1,7 @@
 {
   "mode": "real",
   "dry_run_collect": true,
+  "collect_to_box_only": true,
   "no_publish": true,
   "max_items_per_run": 10,
   "max_pages_per_keyword": 2,

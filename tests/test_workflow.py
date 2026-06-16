@@ -73,6 +73,67 @@ class WorkflowTest(unittest.TestCase):
         }])
         return app.DB.get_candidate(candidate["id"])
 
+    def test_automation_current_status_reports_pipeline_progress(self):
+        run = app.create_pipeline_run()
+        candidate = app.DB.import_candidates(["https://detail.1688.com/offer/900001.html"], keyword="运动鞋")[0]
+        app.DB.update_candidate(candidate["id"], {
+            "title": "透气运动鞋",
+            "clean_title": "Breathable Sports Shoes",
+            "image_status": "image_ready",
+            "precheck_status": "precheck_passed",
+            "collected_at": 123,
+        })
+        app.DB.save_collection_box_record({
+            "candidate_id": candidate["id"],
+            "offer_id": "900001",
+            "source_url": candidate["source_url"],
+            "clean_title": "Breathable Sports Shoes",
+            "image_status": "image_ready",
+            "miaoshou_status": "collected_to_box",
+        })
+        app.save_pipeline_context(
+            run["id"],
+            currentKeyword="运动鞋",
+            currentPage=1,
+            currentCandidateId=candidate["id"],
+            currentProduct="透气运动鞋",
+            currentStepKey="image_check",
+            currentStep="图片检查",
+            itemProgress=70,
+            totalProgress=62,
+        )
+
+        status = app.automation_current_status()
+
+        self.assertEqual(status["runId"], run["id"])
+        self.assertEqual(status["currentKeyword"], "运动鞋")
+        self.assertEqual(status["currentProduct"], "透气运动鞋")
+        self.assertEqual(status["currentStep"], "图片检查")
+        self.assertGreaterEqual(status["totalProgress"], 62)
+        self.assertGreaterEqual(status["counters"]["savedCandidates"], 1)
+        self.assertGreaterEqual(status["counters"]["collectedToBox"], 1)
+
+    def test_automation_failures_include_pipeline_logs_and_actions(self):
+        run = app.create_pipeline_run()
+        log = app.pipeline_log(
+            run,
+            "妙手采集",
+            "failed",
+            message="妙手采集箱流程未完成",
+            error="未找到采集箱入口",
+            screenshot="/tmp/shot.png",
+            current_url="https://erp.91miaoshou.com/",
+            details={"suggestedActions": ["校准采集箱入口"]},
+        )
+
+        failures = app.automation_failures()["items"]
+        result = app.resolve_failure_task({"source": "automation_log", "id": log["id"], "action": "mark_handled"})
+
+        self.assertEqual(failures[0]["source"], "automation_log")
+        self.assertEqual(failures[0]["currentStep"], "妙手采集")
+        self.assertIn("retry", failures[0]["actions"])
+        self.assertEqual(result["resolution"], "handled")
+
     def test_workflow_summary_empty_database_returns_all_steps(self):
         summary = app.workflow_summary()
         keys = [item["key"] for item in summary["steps"]]
@@ -321,6 +382,17 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(candidate_result["cleaned"], 1)
         self.assertEqual(refreshed["clean_title"], "Breathable Summer Sports Shoes")
         self.assertTrue(app.DB.list_title_cleaning_records(candidate["id"]))
+
+    def test_miaoshou_collect_ready_api_uses_safe_adapter(self):
+        handler = type("FakeHandler", (), {"send_json": lambda self, payload, status=200: {"payload": payload, "status": status}})()
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710018.html")
+
+        with patch.object(app.MIAOSHOU, "collect_ready", return_value={"items": [{"id": "run-1"}], "blocked": []}) as collect_ready:
+            response = app.AppHandler.route_post(handler, "/api/miaoshou/collect-ready", {"candidateIds": [candidate["id"]]})
+
+        collect_ready.assert_called_once_with([candidate["id"]])
+        self.assertEqual(response["status"], 201)
+        self.assertEqual(response["payload"]["items"][0]["id"], "run-1")
 
     def test_product_and_collection_box_use_clean_title(self):
         candidate = self.collectable_candidate("https://detail.1688.com/offer/710013.html")

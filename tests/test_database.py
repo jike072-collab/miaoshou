@@ -51,6 +51,7 @@ class DatabaseTest(unittest.TestCase):
             "source_url": candidate["source_url"],
             "clean_title": "透气运动鞋",
             "image_status": "approved",
+            "images_used": ["/tmp/a.jpg", "/tmp/b.jpg"],
             "miaoshou_status": "采集箱",
             "run_id": "run-1",
         })
@@ -59,6 +60,7 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(record["candidate_id"], candidate["id"])
         self.assertEqual(record["offer_id"], "123456")
         self.assertEqual(record["miaoshou_status"], "采集箱")
+        self.assertEqual(record["images_used"], ["/tmp/a.jpg", "/tmp/b.jpg"])
         self.assertEqual(records[0]["id"], record["id"])
 
     def test_candidate_can_store_precheck_fields(self):
@@ -158,6 +160,31 @@ class DatabaseTest(unittest.TestCase):
         run = self.db.create_run("publish", ["准备"], batch_id="batch", context={"phase": "prepare"})
         updated = self.db.update_run(run["id"], context={"phase": "confirm", "confirmedBy": "user"})
         self.assertEqual(updated["context"], {"phase": "confirm", "confirmedBy": "user"})
+
+    def test_automation_log_round_trip_and_resolution(self):
+        run = self.db.create_run("pipeline", ["搜索"])
+        log = self.db.save_automation_log({
+            "run_id": run["id"],
+            "sourcing_run_id": "source-1",
+            "candidate_id": "candidate-1",
+            "product": "透气运动鞋",
+            "keyword": "运动鞋",
+            "current_step": "图片检查",
+            "status": "failed",
+            "message": "图片未达标",
+            "error": "图片含中文",
+            "screenshot": "/tmp/shot.png",
+            "current_url": "https://example.com",
+            "details": {"suggestedActions": ["换图"]},
+        })
+
+        logs = self.db.list_automation_logs(run["id"])
+        updated = self.db.update_automation_log(log["id"], resolution="handled")
+
+        self.assertEqual(logs[0]["id"], log["id"])
+        self.assertEqual(logs[0]["details"], {"suggestedActions": ["换图"]})
+        self.assertEqual(logs[0]["current_step"], "图片检查")
+        self.assertEqual(updated["resolution"], "handled")
 
 
 if __name__ == "__main__":

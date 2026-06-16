@@ -4,7 +4,7 @@ from pathlib import Path
 
 from lib.automation import AutomationEngine
 from lib.database import Database
-from lib.local_config import assert_publish_allowed, config_status, ensure_local_runtime, load_config, save_config
+from lib.local_config import assert_publish_allowed, assert_safe_collection_action, config_status, ensure_local_runtime, load_config, save_config
 
 
 class LocalConfigTest(unittest.TestCase):
@@ -41,6 +41,18 @@ class LocalConfigTest(unittest.TestCase):
             assert_publish_allowed(config, [{"type": "clickText", "text": "确认发布"}], "发布动作配方")
 
         self.assertTrue(assert_publish_allowed(config, [{"type": "fill", "selector": "#title", "value": "鞋"}], "草稿动作"))
+
+    def test_miaoshou_box_recipe_is_blocked_when_it_contains_publish_actions(self):
+        config = load_config(self.root)
+
+        with self.assertRaisesRegex(RuntimeError, "no_publish=true"):
+            assert_publish_allowed(config, [{"type": "clickText", "text": "加入采集箱"}, {"type": "clickText", "text": "确认发布"}], "妙手采集箱安全配方")
+
+    def test_safe_collection_action_blocks_publish_terms(self):
+        config = load_config(self.root)
+
+        with self.assertRaisesRegex(RuntimeError, "no_publish=true"):
+            assert_safe_collection_action(config, "加入采集箱 确认发布", "妙手采集箱安全配方")
 
     def test_live_confirm_publish_is_blocked_by_default(self):
         db = Database(self.root / "test.db")

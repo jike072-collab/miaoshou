@@ -108,6 +108,7 @@ class Database:
             source_url TEXT NOT NULL DEFAULT '',
             clean_title TEXT NOT NULL DEFAULT '',
             image_status TEXT NOT NULL DEFAULT '',
+            images_used TEXT NOT NULL DEFAULT '[]',
             collected_at INTEGER NOT NULL,
             miaoshou_status TEXT NOT NULL DEFAULT '',
             run_id TEXT NOT NULL DEFAULT '',
@@ -269,6 +270,24 @@ class Database:
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS automation_logs (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL DEFAULT '',
+            sourcing_run_id TEXT NOT NULL DEFAULT '',
+            candidate_id TEXT NOT NULL DEFAULT '',
+            product TEXT NOT NULL DEFAULT '',
+            keyword TEXT NOT NULL DEFAULT '',
+            current_step TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL DEFAULT '',
+            error TEXT NOT NULL DEFAULT '',
+            screenshot TEXT NOT NULL DEFAULT '',
+            current_url TEXT NOT NULL DEFAULT '',
+            resolution TEXT NOT NULL DEFAULT '',
+            details TEXT NOT NULL DEFAULT '{}',
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_automation_logs_run_time ON automation_logs(run_id, created_at DESC);
         CREATE TABLE IF NOT EXISTS settings (
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
@@ -328,6 +347,12 @@ class Database:
                 connection.execute("ALTER TABLE automation_runs ADD COLUMN diagnostics TEXT NOT NULL DEFAULT '{}'")
             if "resolution" not in columns:
                 connection.execute("ALTER TABLE automation_runs ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
+            collection_box_columns = {row[1] for row in connection.execute("PRAGMA table_info(collection_box_records)")}
+            if "images_used" not in collection_box_columns:
+                connection.execute("ALTER TABLE collection_box_records ADD COLUMN images_used TEXT NOT NULL DEFAULT '[]'")
+            automation_log_columns = {row[1] for row in connection.execute("PRAGMA table_info(automation_logs)")}
+            if automation_log_columns and "resolution" not in automation_log_columns:
+                connection.execute("ALTER TABLE automation_logs ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
             generation_columns = {row[1] for row in connection.execute("PRAGMA table_info(generation_jobs)")}
             if "context" not in generation_columns:
                 connection.execute("ALTER TABLE generation_jobs ADD COLUMN context TEXT NOT NULL DEFAULT '{}'")
@@ -374,6 +399,7 @@ class Database:
             "automation.node_path": "/Users/mac/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node",
             "automation.plugin_collect_texts": ["采集此产品", "妙手采集", "采集"],
             "automation.plugin_success_texts": ["采集成功", "已采集", "提交成功"],
+            "automation.miaoshou_box_recipe": [],
             "automation.collection_recipe": [],
             "automation.link_collection_recipe": [],
             "automation.publish_recipe": [],
@@ -418,7 +444,7 @@ class Database:
         if row is None:
             return None
         item = dict(row)
-        for key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "precheck_details", "title_clean_removed_terms", "title_clean_risk_terms", "image_reasons", "image_details", "local_images", "removed_terms", "risk_terms", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics", "details"):
+        for key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "precheck_details", "title_clean_removed_terms", "title_clean_risk_terms", "image_reasons", "image_details", "local_images", "images_used", "removed_terms", "risk_terms", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics", "details"):
             if key in item and isinstance(item[key], str):
                 try:
                     item[key] = json.loads(item[key])
@@ -725,6 +751,7 @@ class Database:
             values.get("source_url") or values.get("sourceUrl") or "",
             values.get("clean_title") or values.get("cleanTitle") or "",
             values.get("image_status") or values.get("imageStatus") or "",
+            json.dumps(values.get("images_used") or values.get("imagesUsed") or [], ensure_ascii=False),
             int(values.get("collected_at") or values.get("collectedAt") or now),
             values.get("miaoshou_status") or values.get("miaoshouStatus") or "",
             values.get("run_id") or values.get("runId") or "",
@@ -734,14 +761,15 @@ class Database:
             connection.execute(
                 """INSERT INTO collection_box_records(
                     id,candidate_id,offer_id,source_url,clean_title,image_status,
-                    collected_at,miaoshou_status,run_id,created_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                    images_used,collected_at,miaoshou_status,run_id,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET
                     candidate_id=excluded.candidate_id,
                     offer_id=excluded.offer_id,
                     source_url=excluded.source_url,
                     clean_title=excluded.clean_title,
                     image_status=excluded.image_status,
+                    images_used=excluded.images_used,
                     collected_at=excluded.collected_at,
                     miaoshou_status=excluded.miaoshou_status,
                     run_id=excluded.run_id""",
@@ -846,3 +874,61 @@ class Database:
 
     def list_runs(self):
         return self.rows("SELECT * FROM automation_runs ORDER BY created_at DESC LIMIT 100")
+
+    def save_automation_log(self, values):
+        now = int(values.get("created_at") or values.get("createdAt") or time.time())
+        log_id = str(values.get("id") or uuid.uuid4().hex)
+        payload = (
+            log_id,
+            values.get("run_id") or values.get("runId") or "",
+            values.get("sourcing_run_id") or values.get("sourcingRunId") or "",
+            values.get("candidate_id") or values.get("candidateId") or "",
+            values.get("product") or "",
+            values.get("keyword") or "",
+            values.get("current_step") or values.get("currentStep") or values.get("step") or "",
+            values.get("status") or "",
+            values.get("message") or "",
+            values.get("error") or "",
+            values.get("screenshot") or "",
+            values.get("current_url") or values.get("currentUrl") or "",
+            values.get("resolution") or "",
+            json.dumps(values.get("details") or {}, ensure_ascii=False),
+            now,
+        )
+        with self.lock, self.connect() as connection:
+            connection.execute(
+                """INSERT INTO automation_logs(
+                    id,run_id,sourcing_run_id,candidate_id,product,keyword,current_step,
+                    status,message,error,screenshot,current_url,resolution,details,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                payload,
+            )
+        return self.row("SELECT * FROM automation_logs WHERE id=?", (log_id,))
+
+    def update_automation_log(self, log_id, **values):
+        allowed = {"status", "message", "error", "screenshot", "current_url", "resolution", "details"}
+        columns, params = [], []
+        for key, value in values.items():
+            if key not in allowed:
+                continue
+            if key == "details":
+                value = json.dumps(value or {}, ensure_ascii=False)
+            columns.append("%s = ?" % key)
+            params.append(value)
+        if not columns:
+            return self.row("SELECT * FROM automation_logs WHERE id=?", (log_id,))
+        params.append(log_id)
+        self.execute("UPDATE automation_logs SET %s WHERE id = ?" % ", ".join(columns), params)
+        return self.row("SELECT * FROM automation_logs WHERE id=?", (log_id,))
+
+    def list_automation_logs(self, run_id="", limit=100):
+        limit = min(max(1, int(limit or 100)), 500)
+        if run_id:
+            return self.rows(
+                "SELECT * FROM automation_logs WHERE run_id=? ORDER BY created_at DESC, id DESC LIMIT ?",
+                (run_id, limit),
+            )
+        return self.rows(
+            "SELECT * FROM automation_logs ORDER BY created_at DESC, id DESC LIMIT ?",
+            (limit,),
+        )
