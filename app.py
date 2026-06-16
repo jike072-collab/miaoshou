@@ -22,6 +22,7 @@ from lib.browser_manager import BrowserManager
 from lib.collector import CollectError, fetch_image, scrape_product
 from lib.database import Database, MARKETS
 from lib.evaluation import evaluate_candidate, evaluation_status
+from lib.image_inspector import analyze_candidate_images, make_image_record_payload
 from lib.image_gateway import ImageGatewayError, generate
 from lib.keychain import get_secret, set_secret
 from lib.local_config import config_status, ensure_local_runtime, load_config, load_or_create_token, save_config
@@ -103,6 +104,16 @@ PRECHECK_STATUS_LABELS = {
     "low_priority_skipped": "低优先级跳过",
     "risk_blocked": "风险阻断",
     "precheck_failed": "预检失败",
+}
+
+IMAGE_STATUS_LABELS = {
+    "image_pending": "待检查",
+    "original_usable": "原图可用",
+    "needs_cleanup": "需处理",
+    "needs_generation": "需生图",
+    "image_processing": "处理中",
+    "image_ready": "图片已就绪",
+    "image_failed": "图片失败",
 }
 
 PRECHECK_BLOCK_STATUSES = {
@@ -293,6 +304,14 @@ def primary_candidate_image(candidate):
     return candidate.get("main_image_url") or ""
 
 
+def candidate_image_status(candidate):
+    return str((candidate or {}).get("image_status") or "image_pending")
+
+
+def candidate_image_ready(candidate):
+    return candidate_image_status(candidate) == "image_ready"
+
+
 def candidate_dedupe_status(candidate):
     return str((candidate or {}).get("dedupe_status") or "new_candidate")
 
@@ -459,6 +478,110 @@ def clean_titles_for_candidates(candidate_ids=None):
                 "error": str(exc),
             })
     return {"items": items, "blocked": blocked, "cleaned": len(items)}
+
+
+def image_dir_for_candidate(candidate_id):
+    path = DATA_DIR / "images" / str(candidate_id)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def update_candidate_image_result(candidate, summary):
+    checked_at = int(time.time())
+    status = summary.get("status") or "image_pending"
+    reasons = summary.get("reasons") or []
+    local_paths = summary.get("local_paths") or []
+    updated = DB.update_candidate(candidate["id"], {
+        "image_status": status,
+        "image_reason": "；".join(reasons[:3]) if reasons else ("原图可用" if status == "image_ready" else ""),
+        "image_reasons": reasons,
+        "image_details": summary.get("details") or {},
+        "image_checked_at": checked_at,
+        "local_images": local_paths,
+    })
+    if hasattr(DB, "save_image_analysis_record"):
+        DB.save_image_analysis_record(make_image_record_payload(candidate, {
+            **summary,
+            "status": status,
+        }, image_path=local_paths[0] if local_paths else ""))
+    return updated
+
+
+def download_candidate_images(candidate_ids=None):
+    ids = candidate_ids or [item["id"] for item in DB.list_candidates()]
+    items, blocked = [], []
+    for candidate_id in ids:
+        candidate = DB.get_candidate(candidate_id)
+        if not candidate:
+            blocked.append({"id": candidate_id, "error": "候选商品不存在"})
+            continue
+        try:
+            summary = analyze_candidate_images(candidate, image_dir=image_dir_for_candidate(candidate_id))
+            updated = update_candidate_image_result(candidate, summary)
+            items.append({
+                "candidate": candidate_summary(updated),
+                "status": updated.get("image_status"),
+                "downloaded": len(summary.get("local_paths") or []),
+                "failed": summary.get("failed") or [],
+                "items": summary.get("items") or [],
+            })
+        except Exception as exc:
+            blocked.append({"id": candidate_id, "title": candidate.get("title") or candidate_id, "error": str(exc)})
+    return {"items": items, "blocked": blocked, "downloaded": sum(item.get("downloaded") or 0 for item in items)}
+
+
+def analyze_candidate_images_for_ids(candidate_ids=None):
+    ids = candidate_ids or [item["id"] for item in DB.list_candidates()]
+    items, blocked = [], []
+    for candidate_id in ids:
+        candidate = DB.get_candidate(candidate_id)
+        if not candidate:
+            blocked.append({"id": candidate_id, "error": "候选商品不存在"})
+            continue
+        try:
+            summary = analyze_candidate_images(candidate, image_dir=image_dir_for_candidate(candidate_id))
+            updated = update_candidate_image_result(candidate, summary)
+            items.append({
+                "candidate": candidate_summary(updated),
+                "status": updated.get("image_status"),
+                "reasons": updated.get("image_reasons") or [],
+                "details": updated.get("image_details") or {},
+                "localImages": updated.get("local_images") or [],
+                "items": summary.get("items") or [],
+            })
+        except Exception as exc:
+            blocked.append({"id": candidate_id, "title": candidate.get("title") or candidate_id, "error": str(exc)})
+    return {
+        "items": items,
+        "blocked": blocked,
+        "ready": sum(1 for item in items if item.get("status") == "image_ready"),
+        "needsGeneration": sum(1 for item in items if item.get("status") == "needs_generation"),
+        "failed": sum(1 for item in items if item.get("status") == "image_failed") + len(blocked),
+    }
+
+
+def auto_process_candidate_images(candidate_ids=None):
+    result = analyze_candidate_images_for_ids(candidate_ids)
+    processed = []
+    blocked = list(result.get("blocked") or [])
+    for item in result.get("items") or []:
+        candidate = item.get("candidate") or {}
+        if item.get("status") == "image_ready":
+            processed.append(item)
+            continue
+        blocked.append({
+            "id": candidate.get("id") or "",
+            "title": candidate.get("title") or candidate.get("source_product_id") or "",
+            "imageStatus": item.get("status"),
+            "imageStatusLabel": IMAGE_STATUS_LABELS.get(item.get("status"), item.get("status")),
+            "imageReasons": item.get("reasons") or [],
+            "error": "图片未达标，不能进入妙手采集箱",
+        })
+    return {
+        **result,
+        "processed": processed,
+        "blocked": blocked,
+    }
 
 
 def current_season_fit_status(candidate, month=None):
@@ -740,6 +863,15 @@ def candidate_summary(candidate):
     candidate["titleCleanRiskTerms"] = candidate.get("title_clean_risk_terms") or []
     candidate["titleCleanedAt"] = candidate.get("title_cleaned_at")
     candidate["titleNeedsClean"] = precheck.get("precheck_details", {}).get("titleNeedsClean", False)
+    image_status = candidate_image_status(candidate)
+    candidate["imageStatus"] = image_status
+    candidate["imageStatusLabel"] = IMAGE_STATUS_LABELS.get(image_status, image_status)
+    candidate["imageReason"] = candidate.get("image_reason") or ""
+    candidate["imageReasons"] = candidate.get("image_reasons") or []
+    candidate["imageDetails"] = candidate.get("image_details") or {}
+    candidate["imageCheckedAt"] = candidate.get("image_checked_at")
+    candidate["localImages"] = candidate.get("local_images") or []
+    candidate["imageReady"] = image_status == "image_ready"
     candidate["seaFitStatus"] = precheck.get("sea_fit_status") or ""
     candidate["seasonFitStatus"] = precheck.get("season_fit_status") or ""
     candidate["precheckBlocked"] = precheck_status in PRECHECK_BLOCK_STATUSES and precheck_status != "not_checked"
@@ -761,6 +893,7 @@ def candidate_summary(candidate):
         and not candidate_is_skipped(candidate)
         and not candidate["duplicateSkipped"]
         and precheck_status == "precheck_passed"
+        and candidate["imageReady"]
     )
     candidate["queue"] = candidate_queue(candidate)
     candidate["workflowStatus"] = get_candidate_workflow_status(candidate)
@@ -811,6 +944,22 @@ def get_candidate_workflow_status(candidate):
         return workflow_status("candidate_ready_to_score", next_action="五国评分")
     market_summary = candidate.get("marketSummary") or candidate_market_summary(candidate)
     if market_summary.get("collectableMarkets"):
+        image_status = candidate_image_status(candidate)
+        if image_status in ("image_failed", "needs_generation"):
+            return workflow_status(
+                "image_needs_generation",
+                blocked=True,
+                failed=image_status == "image_failed",
+                next_action=IMAGE_STATUS_LABELS.get(image_status, "处理图片"),
+                detail=candidate.get("image_reason") or "图片未达标",
+            )
+        if image_status in ("image_pending", "original_usable", "needs_cleanup", "image_processing"):
+            return workflow_status(
+                "image_needs_generation",
+                blocked=True,
+                next_action="图片自动判断",
+                detail=IMAGE_STATUS_LABELS.get(image_status, "图片待处理"),
+            )
         return workflow_status("candidate_collectable", next_action="采集达标商品", detail="达标 %d 国" % len(market_summary.get("collectableMarkets") or []))
     return workflow_status("candidate_scored", blocked=True, next_action="人工复核或跳过", detail="无可采集国家")
 
@@ -1006,6 +1155,8 @@ def filter_candidates_by_status(candidates, status):
         return [item for item in summaries if item["queue"] == "duplicate_skipped"]
     if status in ("precheck_passed", "risk_blocked", "low_priority_skipped"):
         return [item for item in summaries if item["precheckStatus"] == status]
+    if status in IMAGE_STATUS_LABELS:
+        return [item for item in summaries if item.get("imageStatus") == status]
     return summaries
 
 
@@ -1351,6 +1502,25 @@ def collect_qualified_candidates(candidate_ids, markets=None, review=False):
             continue
         candidate = DB.get_candidate(candidate["id"])
         summary = candidate_summary(candidate)
+        if not summary.get("imageReady"):
+            image_result = auto_process_candidate_images([candidate["id"]])
+            candidate = DB.get_candidate(candidate["id"])
+            summary = candidate_summary(candidate)
+            if not summary.get("imageReady"):
+                result_item = (image_result.get("items") or [{}])[0]
+                blocked.append({
+                    "id": candidate["id"],
+                    "title": summary.get("title") or summary.get("source_product_id") or candidate["id"],
+                    "imageStatus": summary.get("imageStatus"),
+                    "imageStatusLabel": summary.get("imageStatusLabel"),
+                    "imageReason": summary.get("imageReason") or "",
+                    "imageReasons": summary.get("imageReasons") or result_item.get("reasons") or [],
+                    "imageDetails": summary.get("imageDetails") or result_item.get("details") or {},
+                    "error": "图片未达标，不能进入妙手采集箱",
+                })
+                continue
+        candidate = DB.get_candidate(candidate["id"])
+        summary = candidate_summary(candidate)
         collectable_markets = [
             item["market"] for item in candidate["evaluations"]
             if item["total_score"] >= threshold and item["confidence"] >= confidence and not item["hard_blocks"]
@@ -1519,7 +1689,7 @@ def workflow_summary():
             pending=max(0, qualified - collected_candidates - product_count),
             done=product_count or collected_candidates,
             failed=collection_failed,
-            blocked=qualified > 0 and (collection_failed > 0 or product_count == 0),
+            blocked=qualified > 0 and (collection_failed > 0 or product_count == 0 or any(not item.get("imageReady") for item in candidates if item.get("qualifiedMarkets"))),
             action="采集达标",
         ),
         workflow_step(
@@ -2208,6 +2378,17 @@ def evaluate_candidates(candidate_ids):
 
 
 def source_image_bytes(url):
+    if url.startswith("/images/"):
+        path = (DATA_DIR / url.lstrip("/")).resolve()
+        try:
+            path.relative_to((DATA_DIR / "images").resolve())
+        except ValueError:
+            raise ImageGatewayError("本地主图路径无效")
+        if not path.is_file():
+            raise ImageGatewayError("本地主图不存在")
+        data = path.read_bytes()
+        content_type = mimetypes.guess_type(str(path))[0] or "image/jpeg"
+        return data, path.name
     if url.startswith("/assets/"):
         path = ASSET_DIR / Path(url).name
         if not path.is_file():
@@ -2306,6 +2487,12 @@ def ensure_product_from_candidate(candidate_id):
         clean_candidate_title(candidate_id)
         candidate = DB.get_candidate(candidate_id)
     images = candidate.get("images") or []
+    local_images = candidate.get("local_images") or []
+    main_image = images[0] if images else ""
+    if candidate_image_ready(candidate) and local_images:
+        first_local = Path(local_images[0])
+        if first_local.is_file():
+            main_image = "/images/%s/%s" % (candidate_id, first_local.name)
     product_title = candidate_display_title(candidate) or "1688商品 %s" % (candidate.get("source_product_id") or "")
     product = DB.save_product({
         "candidateId": candidate_id,
@@ -2317,7 +2504,7 @@ def ensure_product_from_candidate(candidate_id):
         "costPrice": candidate.get("source_price") or 0,
         "weightG": candidate.get("weight_g") or 0,
         "images": images,
-        "mainImage": images[0] if images else "",
+        "mainImage": main_image,
         "status": "待图片审核",
     })
     if hasattr(DB, "save_title_cleaning_record"):
@@ -2331,6 +2518,8 @@ def ensure_product_from_candidate(candidate_id):
             "cleaned_at": candidate.get("title_cleaned_at") or int(time.time()),
         })
     create_market_versions(product["id"])
+    if candidate_image_ready(candidate):
+        ensure_candidate_ready_assets(product, candidate)
     return product
 
 
@@ -2344,11 +2533,32 @@ def register_collection_box_record(candidate, run=None, product=None):
         "offer_id": candidate.get("source_product_id") or "",
         "source_url": candidate.get("source_url") or "",
         "clean_title": clean_title,
-        "image_status": "approved" if (product or {}).get("mainImage") or (candidate.get("images") or []) else "pending",
+        "image_status": candidate_image_status(candidate),
         "collected_at": collected_at,
         "miaoshou_status": (product or {}).get("status") or candidate.get("status") or "",
         "run_id": (run or {}).get("id") or "",
     })
+
+
+def ensure_candidate_ready_assets(product, candidate):
+    if not product or not candidate:
+        return []
+    existing = DB.rows("SELECT * FROM assets WHERE product_id=? AND kind='source' AND approved=1 AND review_status='approved'", (product["id"],))
+    if existing:
+        return existing
+    created = []
+    for index, local_path in enumerate(candidate.get("local_images") or []):
+        local_path = Path(local_path)
+        if not local_path.is_file():
+            continue
+        asset_id = uuid.uuid4().hex
+        url = "/images/%s/%s" % (candidate["id"], local_path.name)
+        DB.execute(
+            "INSERT INTO assets(id,product_id,url,kind,approved,review_status,rejection_reason,prompt,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (asset_id, product["id"], url, "source", 1, "approved", "", "图片自动判断原图可用 #%d" % (index + 1), int(time.time())),
+        )
+        created.append(DB.row("SELECT * FROM assets WHERE id=?", (asset_id,)))
+    return created
 
 
 def ensure_approved_asset_for_product(product):
@@ -2358,7 +2568,7 @@ def ensure_approved_asset_for_product(product):
     image = product.get("mainImage") or (product.get("images") or [""])[0]
     if not image:
         return None
-    if image.startswith("/assets/"):
+    if image.startswith("/assets/") or image.startswith("/images/"):
         url = image
     else:
         raw, content_type = fetch_image(image)
@@ -3304,7 +3514,7 @@ def system_selfcheck():
         "id": "candidate_images",
         "label": "候选主图",
         "status": "pass" if candidates and image_ready == len(candidates) else "warn",
-        "detail": "%d/%d 个候选已有图片" % (image_ready, len(candidates)),
+        "detail": "%d/%d 个候选已有图片，%d 个已就绪" % (image_ready, len(candidates), sum(1 for item in candidates if item.get("imageReady"))),
     })
     checks.append({
         "id": "candidate_supply_data",
@@ -3536,6 +3746,16 @@ class AppHandler(BaseHTTPRequestHandler):
                 return self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
         if path.startswith("/assets/"):
             return self.serve_file(ASSET_DIR / Path(path).name, cache=True)
+        image_match = re.match(r"^/images/([a-zA-Z0-9_-]+)/([^/]+)$", path)
+        if image_match:
+            candidate_id = image_match.group(1)
+            filename = Path(image_match.group(2)).name
+            image_path = (DATA_DIR / "images" / candidate_id / filename).resolve()
+            try:
+                image_path.relative_to((DATA_DIR / "images" / candidate_id).resolve())
+            except ValueError:
+                return self.send_error(HTTPStatus.NOT_FOUND)
+            return self.serve_file(image_path, cache=True)
         if path == "/":
             return self.serve_file(STATIC_DIR / "index.html")
         candidate = (STATIC_DIR / path.lstrip("/")).resolve()
@@ -3792,6 +4012,15 @@ class AppHandler(BaseHTTPRequestHandler):
                 payload.get("kinds"),
             )
             return self.send_json(job, HTTPStatus.CREATED)
+
+        if path == "/api/images/download":
+            return self.send_json(download_candidate_images(candidate_ids_from_payload(payload)))
+
+        if path == "/api/images/analyze":
+            return self.send_json(analyze_candidate_images_for_ids(candidate_ids_from_payload(payload)))
+
+        if path == "/api/images/auto-process":
+            return self.send_json(auto_process_candidate_images(candidate_ids_from_payload(payload)))
 
         if path == "/api/images/bulk-generate":
             response = bulk_generate_images(payload)

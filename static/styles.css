@@ -962,6 +962,33 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   max-width: 180px;
   color: #236847;
 }
+.image-summary article {
+  min-height: 52px;
+}
+.image-status-inline {
+  display: grid;
+  gap: 3px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: #f5f7f4;
+  font-size: 9px;
+}
+.image-status-inline span {
+  color: #526057;
+  font-weight: 900;
+}
+.image-status-inline small {
+  color: var(--muted);
+  line-height: 1.4;
+  font-weight: 700;
+}
+.status-image_ready { color: #236847; background: #e8f5ec; }
+.status-original_usable { color: #236847; background: #edf8f1; }
+.status-needs_cleanup { color: #8a5b1d; background: #fff4d8; }
+.status-needs_generation { color: #8a3f1c; background: #fff1e8; }
+.status-image_processing { color: #245a79; background: #ebf6fb; }
+.status-image_failed { color: #8f3c31; background: #feecea; }
 .clean-title-display {
   display: block;
   color: #236847;

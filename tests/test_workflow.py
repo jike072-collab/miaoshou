@@ -13,10 +13,19 @@ from lib.database import Database
 class WorkflowTest(unittest.TestCase):
     def setUp(self):
         self.original_db = app.DB
+        self.original_data_dir = app.DATA_DIR
+        self.original_asset_dir = app.ASSET_DIR
+        self.root = Path(tempfile.mkdtemp())
         app.DB = Database(Path(tempfile.mkdtemp()) / "test.db")
+        app.DATA_DIR = self.root / "data"
+        app.ASSET_DIR = app.DATA_DIR / "assets"
+        app.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        app.ASSET_DIR.mkdir(parents=True, exist_ok=True)
 
     def tearDown(self):
         app.DB = self.original_db
+        app.DATA_DIR = self.original_data_dir
+        app.ASSET_DIR = self.original_asset_dir
 
     def step_map(self):
         return {item["key"]: item for item in app.workflow_summary()["steps"]}
@@ -39,6 +48,11 @@ class WorkflowTest(unittest.TestCase):
                 "https://example.com/shoe-b.jpg",
                 "https://example.com/shoe-c.jpg",
             ],
+            "image_status": "image_ready",
+            "image_reason": "",
+            "image_reasons": [],
+            "image_details": {"usableImages": 3},
+            "local_images": ["/tmp/shoe-a.jpg", "/tmp/shoe-b.jpg", "/tmp/shoe-c.jpg"],
             "sku_complete": True,
         })
         app.precheck_candidates([candidate["id"]])
@@ -319,6 +333,25 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(product["title"], "Breathable Summer Sports Shoes")
         self.assertEqual(record["clean_title"], "Breathable Summer Sports Shoes")
 
+    def test_image_ready_candidate_registers_source_asset(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710016.html")
+        image_dir = app.image_dir_for_candidate(candidate["id"])
+        local_image = image_dir / "ready.jpg"
+        local_image.write_bytes(b"image")
+        app.DB.update_candidate(candidate["id"], {
+            "image_status": "image_ready",
+            "local_images": [str(local_image)],
+        })
+
+        product = app.ensure_product_from_candidate(candidate["id"])
+        assets = app.DB.rows("SELECT * FROM assets WHERE product_id=?", (product["id"],))
+
+        self.assertTrue(product["mainImage"].startswith("/images/"))
+        self.assertEqual(len(assets), 1)
+        self.assertEqual(assets[0]["kind"], "source")
+        self.assertTrue(assets[0]["approved"])
+        self.assertEqual(assets[0]["review_status"], "approved")
+
     def test_high_risk_title_remains_blocked_after_cleaning(self):
         candidate = self.collectable_candidate("https://detail.1688.com/offer/710014.html")
         app.DB.update_candidate(candidate["id"], {"title": "跨境高仿原单透气运动鞋"})
@@ -362,6 +395,53 @@ class WorkflowTest(unittest.TestCase):
         self.assertTrue(summary["canCollect"])
         self.assertEqual([item["id"] for item in passed], [candidate["id"]])
         self.assertTrue(any(item["candidateId"] == candidate["id"] for item in queue["items"]))
+
+    def test_image_not_ready_blocks_miaoshou_collection(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710015.html")
+        app.DB.update_candidate(candidate["id"], {
+            "image_status": "needs_generation",
+            "image_reason": "图片数量不足",
+            "image_reasons": ["图片数量不足"],
+            "image_details": {"usableImages": 1},
+            "local_images": [],
+        })
+        with patch("app.auto_process_candidate_images", return_value={
+            "items": [{
+                "candidate": app.candidate_summary(app.DB.get_candidate(candidate["id"])),
+                "status": "needs_generation",
+                "reasons": ["图片数量不足"],
+                "details": {"usableImages": 1},
+            }],
+            "blocked": [],
+            "ready": 0,
+            "needsGeneration": 1,
+            "failed": 0,
+        }):
+            collection = app.collect_qualified_candidates([candidate["id"]])
+
+        summary = app.candidate_summary(app.DB.get_candidate(candidate["id"]))
+        self.assertFalse(summary["canCollect"])
+        self.assertEqual(collection["items"], [])
+        self.assertEqual(collection["blocked"][0]["imageStatus"], "needs_generation")
+        self.assertEqual(collection["blocked"][0]["error"], "图片未达标，不能进入妙手采集箱")
+
+    def test_auto_process_images_marks_clean_originals_ready(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710017.html")
+        app.DB.update_candidate(candidate["id"], {
+            "image_status": "image_pending",
+            "local_images": [],
+        })
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + (800).to_bytes(4, "big") + (800).to_bytes(4, "big") + b"\x00" * 16
+
+        with patch("lib.image_inspector.fetch_image", return_value=(png, "image/png")):
+            result = app.auto_process_candidate_images([candidate["id"]])
+
+        refreshed = app.DB.get_candidate(candidate["id"])
+        self.assertEqual(result["ready"], 1)
+        self.assertEqual(refreshed["image_status"], "image_ready")
+        self.assertEqual(refreshed["image_details"]["usableImages"], 3)
+        self.assertEqual(len(refreshed["local_images"]), 3)
+        self.assertTrue(app.DB.list_image_analysis_records(candidate["id"]))
 
     def test_precheck_failed_candidate_is_explained_and_blocked(self):
         candidate = self.collectable_candidate("https://detail.1688.com/offer/710006.html")
@@ -428,6 +508,9 @@ class WorkflowTest(unittest.TestCase):
                 "https://example.com/light-b.jpg",
                 "https://example.com/light-c.jpg",
             ],
+            "image_status": "image_ready",
+            "image_details": {"usableImages": 3},
+            "local_images": ["/tmp/light-a.jpg", "/tmp/light-b.jpg", "/tmp/light-c.jpg"],
             "sku_complete": True,
         })
         app.precheck_candidates([candidate["id"]])

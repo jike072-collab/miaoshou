@@ -76,6 +76,12 @@ class Database:
             title_clean_removed_terms TEXT NOT NULL DEFAULT '[]',
             title_clean_risk_terms TEXT NOT NULL DEFAULT '[]',
             title_cleaned_at INTEGER,
+            image_status TEXT NOT NULL DEFAULT 'image_pending',
+            image_reason TEXT NOT NULL DEFAULT '',
+            image_reasons TEXT NOT NULL DEFAULT '[]',
+            image_details TEXT NOT NULL DEFAULT '{}',
+            image_checked_at INTEGER,
+            local_images TEXT NOT NULL DEFAULT '[]',
             status TEXT NOT NULL DEFAULT '待评估',
             collection_channel TEXT,
             collected_at INTEGER,
@@ -117,6 +123,17 @@ class Database:
             risk_terms TEXT NOT NULL DEFAULT '[]',
             status TEXT NOT NULL DEFAULT 'title_cleaned',
             cleaned_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS image_analysis_records (
+            id TEXT PRIMARY KEY,
+            candidate_id TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            local_path TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL DEFAULT 'image_pending',
+            reasons TEXT NOT NULL DEFAULT '[]',
+            details TEXT NOT NULL DEFAULT '{}',
+            checked_at INTEGER NOT NULL,
             created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS evaluations (
@@ -296,6 +313,12 @@ class Database:
                 ("title_clean_removed_terms", "TEXT NOT NULL DEFAULT '[]'"),
                 ("title_clean_risk_terms", "TEXT NOT NULL DEFAULT '[]'"),
                 ("title_cleaned_at", "INTEGER"),
+                ("image_status", "TEXT NOT NULL DEFAULT 'image_pending'"),
+                ("image_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("image_reasons", "TEXT NOT NULL DEFAULT '[]'"),
+                ("image_details", "TEXT NOT NULL DEFAULT '{}'"),
+                ("image_checked_at", "INTEGER"),
+                ("local_images", "TEXT NOT NULL DEFAULT '[]'"),
             ):
                 if name not in candidate_columns:
                     connection.execute("ALTER TABLE candidates ADD COLUMN %s %s" % (name, definition))
@@ -395,7 +418,7 @@ class Database:
         if row is None:
             return None
         item = dict(row)
-        for key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "precheck_details", "title_clean_removed_terms", "title_clean_risk_terms", "removed_terms", "risk_terms", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics"):
+        for key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "precheck_details", "title_clean_removed_terms", "title_clean_risk_terms", "image_reasons", "image_details", "local_images", "removed_terms", "risk_terms", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics", "details"):
             if key in item and isinstance(item[key], str):
                 try:
                     item[key] = json.loads(item[key])
@@ -495,17 +518,19 @@ class Database:
             "precheck_status", "precheck_reason", "precheck_reasons", "precheck_details",
             "sea_fit_status", "season_fit_status", "precheck_checked_at",
             "clean_title", "title_clean_removed_terms", "title_clean_risk_terms",
-            "title_cleaned_at",
+            "title_cleaned_at", "image_status", "image_reason", "image_reasons",
+            "image_details", "image_checked_at", "local_images",
         }
         columns = []
         params = []
         title_changed = "title" in values and "clean_title" not in values
+        images_changed = "images" in values and "image_status" not in values
         for key, value in values.items():
             if key not in allowed:
                 continue
-            if key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "title_clean_removed_terms", "title_clean_risk_terms"):
+            if key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "title_clean_removed_terms", "title_clean_risk_terms", "image_reasons", "local_images"):
                 value = json.dumps(value or [], ensure_ascii=False)
-            if key == "precheck_details":
+            if key in ("precheck_details", "image_details"):
                 value = json.dumps(value or {}, ensure_ascii=False)
             if key == "sku_complete":
                 value = int(bool(value))
@@ -517,6 +542,17 @@ class Database:
                 ("title_clean_removed_terms", json.dumps([], ensure_ascii=False)),
                 ("title_clean_risk_terms", json.dumps([], ensure_ascii=False)),
                 ("title_cleaned_at", None),
+            ):
+                columns.append("%s = ?" % key)
+                params.append(value)
+        if images_changed:
+            for key, value in (
+                ("image_status", "image_pending"),
+                ("image_reason", ""),
+                ("image_reasons", json.dumps([], ensure_ascii=False)),
+                ("image_details", json.dumps({}, ensure_ascii=False)),
+                ("image_checked_at", None),
+                ("local_images", json.dumps([], ensure_ascii=False)),
             ):
                 columns.append("%s = ?" % key)
                 params.append(value)
@@ -749,6 +785,38 @@ class Database:
                 (candidate_id,),
             )
         return self.rows("SELECT * FROM title_cleaning_records ORDER BY cleaned_at DESC, created_at DESC")
+
+    def save_image_analysis_record(self, values):
+        now = int(time.time())
+        checked_at = int(values.get("checked_at") or values.get("checkedAt") or now)
+        record_id = str(values.get("id") or uuid.uuid4().hex)
+        payload = (
+            record_id,
+            values.get("candidate_id") or values.get("candidateId") or "",
+            values.get("source_url") or values.get("sourceUrl") or "",
+            values.get("local_path") or values.get("localPath") or "",
+            values.get("status") or "image_pending",
+            json.dumps(values.get("reasons") or [], ensure_ascii=False),
+            json.dumps(values.get("details") or {}, ensure_ascii=False),
+            checked_at,
+            now,
+        )
+        with self.lock, self.connect() as connection:
+            connection.execute(
+                """INSERT INTO image_analysis_records(
+                    id,candidate_id,source_url,local_path,status,reasons,details,checked_at,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?)""",
+                payload,
+            )
+        return self.row("SELECT * FROM image_analysis_records WHERE id=?", (record_id,))
+
+    def list_image_analysis_records(self, candidate_id=None):
+        if candidate_id:
+            return self.rows(
+                "SELECT * FROM image_analysis_records WHERE candidate_id=? ORDER BY checked_at DESC, created_at DESC",
+                (candidate_id,),
+            )
+        return self.rows("SELECT * FROM image_analysis_records ORDER BY checked_at DESC, created_at DESC")
 
     def create_run(self, kind, steps, batch_id=None, candidate_id=None, status="queued", context=None):
         run_id = uuid.uuid4().hex

@@ -103,6 +103,33 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(record["risk_terms"], ["高仿"])
         self.assertEqual(records[0]["clean_title"], "Sports Shoes")
 
+    def test_candidate_can_store_image_fields_and_records(self):
+        candidate = self.db.import_candidates(["https://detail.1688.com/offer/123456.html"])[0]
+        updated = self.db.update_candidate(candidate["id"], {
+            "image_status": "image_ready",
+            "image_reason": "原图可用",
+            "image_reasons": [],
+            "image_details": {"usableImages": 3, "ocrAvailable": False},
+            "local_images": ["/tmp/a.jpg"],
+            "image_checked_at": 123,
+        })
+        record = self.db.save_image_analysis_record({
+            "candidate_id": candidate["id"],
+            "source_url": candidate["source_url"],
+            "local_path": "/tmp/a.jpg",
+            "status": "image_ready",
+            "reasons": [],
+            "details": {"usableImages": 3},
+            "checked_at": 456,
+        })
+
+        records = self.db.list_image_analysis_records(candidate["id"])
+        self.assertEqual(updated["image_status"], "image_ready")
+        self.assertEqual(updated["image_details"]["usableImages"], 3)
+        self.assertEqual(updated["local_images"], ["/tmp/a.jpg"])
+        self.assertEqual(record["details"]["usableImages"], 3)
+        self.assertEqual(records[0]["status"], "image_ready")
+
     def test_candidate_title_change_invalidates_clean_title(self):
         candidate = self.db.import_candidates(["https://detail.1688.com/offer/123456.html"])[0]
         self.db.update_candidate(candidate["id"], {

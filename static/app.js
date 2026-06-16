@@ -147,6 +147,16 @@ function candidatePrecheckCounts() {
   };
 }
 
+function candidateImageCounts() {
+  return {
+    ready: state.candidates.filter((item) => item.imageStatus === "image_ready").length,
+    usable: state.candidates.filter((item) => item.imageStatus === "original_usable").length,
+    cleanup: state.candidates.filter((item) => item.imageStatus === "needs_cleanup").length,
+    generation: state.candidates.filter((item) => item.imageStatus === "needs_generation").length,
+    failed: state.candidates.filter((item) => item.imageStatus === "image_failed").length,
+  };
+}
+
 function filteredCandidates() {
   if (state.candidateQueue === "all") return state.candidates;
   return state.candidates.filter((item) => item.queue === state.candidateQueue);
@@ -171,6 +181,19 @@ function renderPrecheckSummary() {
     <article><span>低优先级跳过</span><strong>${counts.lowPrioritySkipped}</strong></article>
     <article class="${counts.failed ? "precheck-warn" : ""}"><span>待修复/失败</span><strong>${counts.failed}</strong></article>
     <article><span>未预检</span><strong>${counts.notChecked}</strong></article>
+  `;
+}
+
+function renderImageSummaryBar() {
+  const wrap = $("#candidate-image-summary");
+  if (!wrap) return;
+  const counts = candidateImageCounts();
+  wrap.innerHTML = `
+    <article><span>图片就绪</span><strong>${counts.ready}</strong></article>
+    <article><span>原图可用</span><strong>${counts.usable}</strong></article>
+    <article><span>需处理</span><strong>${counts.cleanup}</strong></article>
+    <article><span>需生图</span><strong>${counts.generation}</strong></article>
+    <article class="${counts.failed ? "precheck-danger" : ""}"><span>失败</span><strong>${counts.failed}</strong></article>
   `;
 }
 
@@ -466,6 +489,7 @@ function renderCandidates() {
   body.innerHTML = "";
   renderCandidateQueues();
   renderPrecheckSummary();
+  renderImageSummaryBar();
   const items = filteredCandidates();
   $("#candidate-empty").classList.toggle("hidden", items.length > 0);
   for (const item of items) {
@@ -473,6 +497,7 @@ function renderCandidates() {
     const scores = Object.keys(markets).map((market) => `<td>${marketChip(item, market)}</td>`).join("");
     const images = Number(item.image_count || (item.images || []).length || 0);
     const riskFlags = (item.risk_flags || []).join("、") || "无";
+    const imageReason = item.imageReason || (item.imageReasons || []).join("、") || "";
     const sourceMeta = [
       item.supplier_name ? `供应商 ${item.supplier_name}` : "",
       item.min_order ? `起批 ${item.min_order}` : "",
@@ -486,7 +511,7 @@ function renderCandidates() {
       <td><div class="candidate-name"><strong>${esc(item.title || `1688商品 ${item.source_product_id || "待识别"}`)}</strong>${item.cleanTitle ? `<small class="clean-title-display">妙手标题：${esc(item.cleanTitle)}</small>` : ""}<a href="${esc(item.source_url)}" target="_blank" rel="noreferrer">${esc(item.source_product_id || "查看来源")}</a><div class="candidate-source-meta">${sourceMeta.map((meta) => `<span>${esc(meta)}</span>`).join("")}</div></div></td>
       <td><span>${esc(item.category || "待补充")}</span><small>¥${Number(item.source_price || 0).toFixed(2)} · ${Number(item.weight_g || 0)}g · SKU${item.sku_complete ? "完整" : "缺失"} · 图${images}</small>${renderCompleteness(item)}<small>风险：${esc(riskFlags)}</small></td>
       <td>${renderFieldStatus(item)}</td>
-      <td>${renderMissingHints(item)}${renderTitleCleanSummary(item)}<button class="inline-next" data-candidate-next="${esc(item.id)}" type="button">${esc(item.precheckStatus === "needs_title_clean" ? "清洗标题" : item.nextAction || "补数据")}</button><small class="market-summary-line">${esc(item.marketSummary?.nextAction || "")}${item.dataCompleteness?.marketDataComplete ? " · 市场数据完整" : " · 市场数据待补"}${item.marketSummary?.qualifiedCount ? ` · 达标 ${item.marketSummary.qualifiedCount} 国` : ""}</small></td>
+      <td>${renderMissingHints(item)}${renderTitleCleanSummary(item)}<div class="image-status-inline status-${esc(item.imageStatus || "image_pending")}"><span>${esc(item.imageStatusLabel || "待检查")}</span><small>${esc(imageReason || "等待图片处理")}</small></div><button class="inline-next" data-candidate-next="${esc(item.id)}" type="button">${esc(item.precheckStatus === "needs_title_clean" ? "清洗标题" : item.nextAction || "补数据")}</button><small class="market-summary-line">${esc(item.marketSummary?.nextAction || "")}${item.dataCompleteness?.marketDataComplete ? " · 市场数据完整" : " · 市场数据待补"}${item.marketSummary?.qualifiedCount ? ` · 达标 ${item.marketSummary.qualifiedCount} 国` : ""}</small></td>
       ${scores}
       <td>${renderCandidateAccess(item)}</td>
       <td><span class="status-chip status-${esc(item.status)}">${esc(item.status)}</span></td>
@@ -662,7 +687,7 @@ function renderProducts() {
     const card = document.createElement("article");
     card.className = "product-studio-card";
     card.dataset.productCard = product.id;
-    const image = product.mainImage ? (product.mainImage.startsWith("/assets/") ? product.mainImage : `/api/image?url=${encodeURIComponent(product.mainImage)}`) : "";
+    const image = product.mainImage ? (product.mainImage.startsWith("/assets/") || product.mainImage.startsWith("/images/") ? product.mainImage : `/api/image?url=${encodeURIComponent(product.mainImage)}`) : "";
     const imageJob = state.imageJobs.find((job) => job.product_id === product.id);
     const imageSummary = imageSummaryForProduct(product.id);
     const failedJob = imageSummary.latestJob?.status === "failed" ? imageSummary.latestJob : null;
@@ -1178,6 +1203,26 @@ $("#clean-title-candidates").addEventListener("click", async () => {
     notify(error.message, "error");
   }
 });
+
+async function imageAction(path, message) {
+  const ids = selectedCandidates();
+  const fallback = filteredCandidates().map((item) => item.id);
+  const targetIds = ids.length ? ids : fallback;
+  if (!targetIds.length) return notify("当前没有可处理的候选图片", "error");
+  try {
+    const data = await api(path, { method: "POST", body: JSON.stringify({ candidateIds: targetIds }) });
+    const ok = Number(data.ready || data.downloaded || (data.processed || []).length || 0);
+    const blocked = Number((data.blocked || []).length || 0);
+    notify(blocked ? `${message}：成功 ${ok}，拦截 ${blocked}` : `${message}：成功 ${ok}`, blocked ? "error" : "success");
+    await loadAll();
+  } catch (error) {
+    notify(error.message, "error");
+  }
+}
+
+$("#download-images").addEventListener("click", () => imageAction("/api/images/download", "图片下载完成"));
+$("#analyze-images").addEventListener("click", () => imageAction("/api/images/analyze", "图片分析完成"));
+$("#auto-process-images").addEventListener("click", () => imageAction("/api/images/auto-process", "图片自动处理完成"));
 
 async function sourcingAction(action, message) {
   const button = $(`#sourcing-${action}`);
