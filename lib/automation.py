@@ -235,9 +235,9 @@ class AutomationEngine:
         run = self.db.get_run(run_id)
         checks = self.preflight()
         if not checks["chromeInstalled"] or not checks["cdpConnected"]:
-            return self.db.update_run(run_id, status="blocked", error="Chrome未连接，请启动专用Chrome")
+            return self.mark_failed(run, "blocked", "Chrome未连接，请启动专用Chrome", "检查Chrome与调试端口", checks=checks)
         if run["kind"] == "publish" and checks["requiresCalibration"]:
-            return self.db.update_run(run_id, status="blocked", error="发布动作配方尚未配置，请先校准妙手页面。")
+            return self.mark_failed(run, "blocked", "发布动作配方尚未配置，请先校准妙手页面。", "检查批次完整性", checks=checks)
         payload = {
             "kind": run["kind"], "port": int(self.db.setting("automation.cdp_port", 9222)),
             "miaoshouUrl": self.db.setting("automation.miaoshou_url", "https://erp.91miaoshou.com/"),
@@ -294,6 +294,47 @@ class AutomationEngine:
                 result = self._invoke_runner(run, fallback_payload)
         return result
 
+    def build_diagnostics(self, run, error, failed_step="", response=None, checks=None):
+        response = response or {}
+        checks = checks or {}
+        current_url = response.get("currentUrl") or response.get("url") or ""
+        screenshot = response.get("screenshot") or ""
+        clickable_text = response.get("clickableText") or response.get("clickableTexts") or []
+        if isinstance(clickable_text, str):
+            clickable_text = [line.strip() for line in clickable_text.splitlines() if line.strip()]
+        suggestions = []
+        text = str(error or "")
+        if "Chrome" in text or "调试" in text:
+            suggestions.append("启动专用Chrome并保持调试端口连接")
+        if "登录" in text:
+            suggestions.append("在专用Chrome中重新确认妙手和1688登录状态")
+        if "插件" in text:
+            suggestions.append("检查妙手插件是否已加载，并校准采集按钮文本")
+        if "配方" in text:
+            suggestions.append("在系统设置中补充采集箱认领或发布动作配方")
+        if not suggestions:
+            suggestions.append("展开任务详情，按当前步骤重新校准页面后重试")
+        return {
+            "failedStep": failed_step or run.get("current_step") or "自动化执行",
+            "error": text,
+            "currentUrl": current_url,
+            "screenshot": screenshot,
+            "clickableText": clickable_text[:20],
+            "suggestedActions": suggestions,
+            "checks": checks,
+        }
+
+    def mark_failed(self, run, status, error, failed_step="", response=None, checks=None):
+        diagnostics = self.build_diagnostics(run, error, failed_step, response=response, checks=checks)
+        return self.db.update_run(
+            run["id"],
+            status=status,
+            error=str(error or ""),
+            current_step=diagnostics["failedStep"],
+            screenshot=diagnostics["screenshot"],
+            diagnostics=diagnostics,
+        )
+
     def _invoke_runner(self, run, payload):
         node_path = self.db.setting("automation.node_path", "node")
         script = Path(__file__).resolve().parent.parent / "scripts" / "cdp_runner.mjs"
@@ -305,9 +346,10 @@ class AutomationEngine:
             lines = [line for line in result.stdout.splitlines() if line.strip()]
             response = json.loads(lines[-1]) if lines else {"ok": False, "error": result.stderr.strip() or "自动化执行器无输出"}
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-            return self.db.update_run(run["id"], status="blocked", error="自动化执行器启动失败：%s" % exc)
+            return self.mark_failed(run, "blocked", "自动化执行器启动失败：%s" % exc, run.get("current_step") or "启动自动化执行器")
         if not response.get("ok"):
-            return self.db.update_run(run["id"], status="blocked", error=response.get("error") or "自动化执行失败")
+            failed_step = response.get("failedStep") or response.get("currentStep") or response.get("step") or run.get("current_step") or "自动化执行"
+            return self.mark_failed(run, "blocked", response.get("error") or "自动化执行失败", failed_step, response=response)
         steps = response.get("events") or []
         if run["kind"] == "keyword_search":
             candidates = response.get("candidates") or []

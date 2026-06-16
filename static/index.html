@@ -32,6 +32,17 @@
       </div>
     </section>
 
+    <section class="workflow-overview" aria-labelledby="workflow-title">
+      <div class="workflow-heading">
+        <div>
+          <p class="eyebrow">LISTING WORKFLOW</p>
+          <h2 id="workflow-title">全流程上架进度</h2>
+        </div>
+        <span class="workflow-note">内部运营看板 · 数据自动汇总</span>
+      </div>
+      <div id="workflow-steps" class="workflow-steps"></div>
+    </section>
+
     <nav class="module-tabs" aria-label="工作模块">
       <button class="module-tab active" data-view="candidates">01 选品雷达</button>
       <button class="module-tab" data-view="products">02 图片工厂</button>
@@ -58,18 +69,54 @@
         </article>
       </div>
 
+      <article class="panel qualified-pool-panel">
+        <div class="table-toolbar compact-toolbar">
+          <div><p class="eyebrow">QUALIFIED COLLECTION POOL</p><h2>五国达标采集池</h2></div>
+          <div class="toolbar-actions">
+            <button id="select-qualified" class="button outline" type="button">选择达标候选</button>
+            <button id="collect-pool" class="button accent" type="button">批量采集达标国家</button>
+            <button id="collect-selected-markets" class="button outline" type="button">只采集指定国家</button>
+            <button id="review-qualified" class="button outline" type="button">转人工复核</button>
+            <button id="skip-qualified" class="button outline" type="button">跳过</button>
+          </div>
+        </div>
+        <div id="qualified-pool" class="qualified-pool"></div>
+      </article>
+
+      <article class="panel table-panel collection-queue-panel">
+        <div class="table-toolbar compact-toolbar">
+          <div><p class="eyebrow">COLLECTION QUEUE</p><h2>商品采集任务队列</h2></div>
+          <div class="toolbar-actions">
+            <button id="collection-start" class="button accent" type="button">批量开始采集</button>
+            <button id="collection-retry" class="button outline" type="button">重试失败任务</button>
+            <button id="collection-skip" class="button outline" type="button">跳过</button>
+            <button id="collection-manual" class="button outline" type="button">转人工处理</button>
+          </div>
+        </div>
+        <div id="collection-queue-tabs" class="candidate-queue-bar collection-queue-tabs"></div>
+        <div id="collection-queue" class="collection-queue"></div>
+      </article>
+
       <article class="panel table-panel">
         <div class="table-toolbar">
           <div><p class="eyebrow">CANDIDATE POOL</p><h2>候选商品与五国评分</h2></div>
           <div class="toolbar-actions">
+            <button id="bulk-check-candidates" class="button outline" type="button">批量检查数据</button>
             <button id="refresh-selected" class="button outline" type="button">从来源补全选中</button>
-            <button id="evaluate-selected" class="button outline" type="button">评估选中</button>
+            <button id="evaluate-selected" class="button outline" type="button">批量进入评分</button>
+            <button id="skip-selected" class="button outline" type="button">标记跳过</button>
+            <button id="delete-invalid" class="button outline danger-outline" type="button">删除无效</button>
             <button id="collect-qualified" class="button accent" type="button">采集达标商品</button>
           </div>
         </div>
+        <div class="candidate-queue-bar">
+          <button class="candidate-queue-tab active" data-candidate-queue="need_data" type="button"><span>待补数据</span><strong id="queue-need-data">0</strong></button>
+          <button class="candidate-queue-tab" data-candidate-queue="ready_to_score" type="button"><span>可评分</span><strong id="queue-ready-score">0</strong></button>
+          <button class="candidate-queue-tab" data-candidate-queue="all" type="button"><span>全部候选</span><strong id="queue-all">0</strong></button>
+        </div>
         <div class="table-scroll">
           <table class="data-table">
-            <thead><tr><th><input id="select-all-candidates" type="checkbox"></th><th>候选商品</th><th>类目/供货</th><th>MY</th><th>PH</th><th>SG</th><th>TH</th><th>VN</th><th>状态</th><th></th></tr></thead>
+            <thead><tr><th><input id="select-all-candidates" type="checkbox"></th><th>候选商品</th><th>基础数据完整度</th><th>字段状态</th><th>缺失提示</th><th>MY</th><th>PH</th><th>SG</th><th>TH</th><th>VN</th><th>准入</th><th>状态</th><th></th></tr></thead>
             <tbody id="candidate-table"></tbody>
           </table>
         </div>
@@ -79,6 +126,7 @@
 
     <section id="view-products" class="module-view hidden">
       <div class="section-intro"><div><p class="eyebrow">IMAGE FACTORY</p><h2>商品与AI图片</h2></div><p>仅采集成功的正式商品进入此处。生图失败或未审核时不会进入发布队列。</p></div>
+      <section id="image-workbench" class="image-workbench" aria-label="图片生成与审核队列"></section>
       <div id="product-cards" class="product-card-grid"></div>
       <div id="product-empty" class="large-empty"><span>02</span><h3>还没有正式商品</h3><p>完成妙手插件采集并同步后，商品会进入图片工厂。</p><button id="create-demo-product" class="button outline" type="button">从达标候选创建演示商品</button></div>
     </section>
@@ -100,19 +148,24 @@
           <div id="shop-list" class="shop-list"></div>
         </article>
         <article class="panel">
-          <div class="panel-title"><span class="step-number light-step">D</span><div><h2>创建铺货批次</h2><p>最多50款商品和20家店铺</p></div></div>
+          <div class="panel-title"><span class="step-number light-step">D</span><div><h2>批次创建预检</h2><p>先检查缺图、价格、库存、仓库、重复铺货和妙手环境</p></div></div>
           <form id="batch-form" class="compact-form">
             <input name="name" placeholder="批次名称" value="五国运动户外铺货">
             <div><span class="mini-label">选择商品</span><div id="batch-products" class="check-list"></div></div>
             <div><span class="mini-label">选择店铺</span><div id="batch-shops" class="check-list"></div></div>
             <label class="switch-row"><input name="dryRun" type="checkbox" checked> 演练模式：填写和校验，但不最终发布</label>
-            <button class="button accent" type="submit">创建批次</button>
+            <div id="batch-preview" class="batch-preview"><p class="muted-line">选择商品和店铺后点击“预检批次”。</p></div>
+            <div class="control-buttons"><button id="preview-batch" class="button outline" type="button">预检批次</button><button class="button accent" type="submit">创建批次</button></div>
           </form>
         </article>
       </div>
       <article class="panel table-panel">
         <div class="table-toolbar"><div><p class="eyebrow">PUBLISH BATCHES</p><h2>铺货批次</h2></div></div>
         <div id="batch-list" class="run-list"></div>
+      </article>
+      <article class="panel table-panel">
+        <div class="table-toolbar"><div><p class="eyebrow">RESULT CENTER</p><h2>发布结果与失败任务中心</h2></div></div>
+        <div id="publish-results-center" class="publish-results-center"></div>
       </article>
       <article class="panel table-panel">
         <div class="table-toolbar"><div><p class="eyebrow">AUTOMATION QUEUE</p><h2>自动化任务</h2></div><button id="refresh-runs" class="button outline" type="button">刷新状态</button></div>
@@ -201,6 +254,14 @@
     </form>
   </dialog>
 
+  <dialog id="collection-detail-dialog">
+    <div class="dialog-shell">
+      <div class="dialog-header"><div><p class="eyebrow">COLLECTION FAILURE</p><h2>采集失败详情</h2></div><button class="close-button" type="button" data-close-dialog>×</button></div>
+      <div id="collection-detail-content" class="collection-detail-content"></div>
+      <div class="dialog-footer"><span>处理后队列会自动同步到失败任务中心。</span><div><button id="collection-detail-retry" class="button accent" type="button">重试</button><button id="collection-detail-skip" class="button outline" type="button">跳过</button></div></div>
+    </div>
+  </dialog>
+
   <dialog id="image-dialog">
     <form id="generation-form" class="dialog-shell">
       <div class="dialog-header"><div><p class="eyebrow">GPT IMAGE</p><h2>创建生图任务</h2></div><button class="close-button" type="button" data-close-dialog>×</button></div>
@@ -226,6 +287,16 @@
       <div class="dialog-header"><div><p class="eyebrow">ASSET REVIEW</p><h2>图片审核</h2></div><button class="close-button" type="button" data-close-dialog>×</button></div>
       <div id="asset-review-grid" class="asset-review-grid"></div>
     </div>
+  </dialog>
+
+  <dialog id="batch-confirm-dialog">
+    <form id="batch-confirm-form" class="dialog-shell">
+      <div class="dialog-header"><div><p class="eyebrow">PUBLISH CONFIRMATION</p><h2>批次强确认</h2></div><button class="close-button" type="button" data-close-dialog>×</button></div>
+      <input name="batchId" type="hidden">
+      <div id="batch-confirm-content" class="batch-confirm-content"></div>
+      <label class="field full"><span>确认短语</span><input name="confirmation" autocomplete="off" placeholder="按上方短语完整输入"></label>
+      <div class="dialog-footer"><span id="batch-confirm-hint">确认后将进入自动化执行队列。</span><button class="button ghost" type="button" data-close-dialog>取消</button><button class="button accent" type="submit">确认执行</button></div>
+    </form>
   </dialog>
 
   <div id="toast" class="toast" role="status"></div>

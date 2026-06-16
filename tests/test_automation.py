@@ -95,6 +95,29 @@ class AutomationTest(unittest.TestCase):
         self.assertEqual(candidate["monthly_sales"], 14000)
         self.assertEqual(candidate["dispatch_hours"], 72)
 
+    def test_failed_collection_persists_structured_diagnostics(self):
+        candidate = self.db.import_candidates(["https://detail.1688.com/offer/123456.html"])[0]
+        run = self.engine.create_collection_run(candidate)
+        response = {
+            "ok": False,
+            "error": "插件按钮未找到",
+            "failedStep": "调用妙手插件采集",
+            "currentUrl": "https://detail.1688.com/offer/123456.html",
+            "screenshot": "/tmp/collect-failed.png",
+            "clickableText": ["采集", "加入采购车", "联系供应商"],
+        }
+        with patch("lib.automation.subprocess.run") as run_command:
+            run_command.return_value.stdout = json.dumps(response, ensure_ascii=False)
+            result = self.engine._invoke_runner(run, {"kind": "collection"})
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertEqual(result["current_step"], "调用妙手插件采集")
+        self.assertEqual(result["screenshot"], "/tmp/collect-failed.png")
+        self.assertEqual(result["diagnostics"]["failedStep"], "调用妙手插件采集")
+        self.assertEqual(result["diagnostics"]["currentUrl"], "https://detail.1688.com/offer/123456.html")
+        self.assertIn("插件", "；".join(result["diagnostics"]["suggestedActions"]))
+        self.assertIn("采集", result["diagnostics"]["clickableText"])
+
 
 if __name__ == "__main__":
     unittest.main()

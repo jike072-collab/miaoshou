@@ -139,6 +139,8 @@ class Database:
             kind TEXT NOT NULL,
             market TEXT,
             approved INTEGER NOT NULL DEFAULT 0,
+            review_status TEXT NOT NULL DEFAULT 'pending',
+            rejection_reason TEXT NOT NULL DEFAULT '',
             prompt TEXT NOT NULL DEFAULT '',
             created_at INTEGER NOT NULL,
             FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
@@ -152,6 +154,12 @@ class Database:
             completed_count INTEGER NOT NULL DEFAULT 0,
             error TEXT NOT NULL DEFAULT '',
             context TEXT NOT NULL DEFAULT '{}',
+            attempts INTEGER NOT NULL DEFAULT 0,
+            failed_api TEXT NOT NULL DEFAULT '',
+            model TEXT NOT NULL DEFAULT '',
+            last_prompt TEXT NOT NULL DEFAULT '',
+            last_error TEXT NOT NULL DEFAULT '',
+            last_run_at INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE
@@ -178,7 +186,9 @@ class Database:
             steps TEXT NOT NULL DEFAULT '[]',
             error TEXT NOT NULL DEFAULT '',
             screenshot TEXT NOT NULL DEFAULT '',
+            diagnostics TEXT NOT NULL DEFAULT '{}',
             attempts INTEGER NOT NULL DEFAULT 0,
+            resolution TEXT NOT NULL DEFAULT '',
             context TEXT NOT NULL DEFAULT '{}',
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
@@ -191,6 +201,12 @@ class Database:
             idempotency_key TEXT PRIMARY KEY,
             batch_id TEXT NOT NULL,
             status TEXT NOT NULL,
+            product_id TEXT NOT NULL DEFAULT '',
+            shop_id TEXT NOT NULL DEFAULT '',
+            market TEXT NOT NULL DEFAULT '',
+            result TEXT NOT NULL DEFAULT '',
+            failure_reason TEXT NOT NULL DEFAULT '',
+            published_at INTEGER,
             created_at INTEGER NOT NULL
         );
         """
@@ -199,9 +215,40 @@ class Database:
             columns = {row[1] for row in connection.execute("PRAGMA table_info(automation_runs)")}
             if "context" not in columns:
                 connection.execute("ALTER TABLE automation_runs ADD COLUMN context TEXT NOT NULL DEFAULT '{}'")
+            if "diagnostics" not in columns:
+                connection.execute("ALTER TABLE automation_runs ADD COLUMN diagnostics TEXT NOT NULL DEFAULT '{}'")
+            if "resolution" not in columns:
+                connection.execute("ALTER TABLE automation_runs ADD COLUMN resolution TEXT NOT NULL DEFAULT ''")
             generation_columns = {row[1] for row in connection.execute("PRAGMA table_info(generation_jobs)")}
             if "context" not in generation_columns:
                 connection.execute("ALTER TABLE generation_jobs ADD COLUMN context TEXT NOT NULL DEFAULT '{}'")
+            for name, definition in (
+                ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+                ("failed_api", "TEXT NOT NULL DEFAULT ''"),
+                ("model", "TEXT NOT NULL DEFAULT ''"),
+                ("last_prompt", "TEXT NOT NULL DEFAULT ''"),
+                ("last_error", "TEXT NOT NULL DEFAULT ''"),
+                ("last_run_at", "INTEGER"),
+            ):
+                if name not in generation_columns:
+                    connection.execute("ALTER TABLE generation_jobs ADD COLUMN %s %s" % (name, definition))
+            asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
+            if "review_status" not in asset_columns:
+                connection.execute("ALTER TABLE assets ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'")
+                connection.execute("UPDATE assets SET review_status='approved' WHERE approved=1")
+            if "rejection_reason" not in asset_columns:
+                connection.execute("ALTER TABLE assets ADD COLUMN rejection_reason TEXT NOT NULL DEFAULT ''")
+            publish_columns = {row[1] for row in connection.execute("PRAGMA table_info(publish_keys)")}
+            for name, definition in (
+                ("product_id", "TEXT NOT NULL DEFAULT ''"),
+                ("shop_id", "TEXT NOT NULL DEFAULT ''"),
+                ("market", "TEXT NOT NULL DEFAULT ''"),
+                ("result", "TEXT NOT NULL DEFAULT ''"),
+                ("failure_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("published_at", "INTEGER"),
+            ):
+                if name not in publish_columns:
+                    connection.execute("ALTER TABLE publish_keys ADD COLUMN %s %s" % (name, definition))
             self._seed_settings(connection)
 
     def _seed_settings(self, connection):
@@ -262,7 +309,7 @@ class Database:
         if row is None:
             return None
         item = dict(row)
-        for key in ("risk_flags", "images", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context"):
+        for key in ("risk_flags", "images", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics"):
             if key in item and isinstance(item[key], str):
                 try:
                     item[key] = json.loads(item[key])
@@ -271,6 +318,8 @@ class Database:
         for key in ("sku_complete", "blocked", "approved", "enabled", "dry_run"):
             if key in item:
                 item[key] = bool(item[key])
+        if item.get("approved") and item.get("review_status") in ("", "pending", None):
+            item["review_status"] = "approved"
         return item
 
     def rows(self, sql, params=()):
@@ -487,21 +536,24 @@ class Database:
     def delete_product(self, product_id):
         return self.execute("DELETE FROM products WHERE id = ?", (product_id,))
 
+    def delete_candidate(self, candidate_id):
+        return self.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
+
     def create_run(self, kind, steps, batch_id=None, candidate_id=None, status="queued", context=None):
         run_id = uuid.uuid4().hex
         now = int(time.time())
         self.execute(
-            "INSERT INTO automation_runs(id,batch_id,candidate_id,kind,status,steps,context,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-            (run_id, batch_id, candidate_id, kind, status, json.dumps(steps, ensure_ascii=False), json.dumps(context or {}, ensure_ascii=False), now, now),
+            "INSERT INTO automation_runs(id,batch_id,candidate_id,kind,status,steps,diagnostics,context,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (run_id, batch_id, candidate_id, kind, status, json.dumps(steps, ensure_ascii=False), json.dumps({}, ensure_ascii=False), json.dumps(context or {}, ensure_ascii=False), now, now),
         )
         return self.get_run(run_id)
 
     def update_run(self, run_id, **values):
-        allowed = {"status", "current_step", "steps", "error", "screenshot", "attempts", "context"}
+        allowed = {"status", "current_step", "steps", "error", "screenshot", "diagnostics", "attempts", "resolution", "context"}
         columns, params = [], []
         for key, value in values.items():
             if key in allowed:
-                if key in ("steps", "context"):
+                if key in ("steps", "context", "diagnostics"):
                     value = json.dumps(value, ensure_ascii=False)
                 columns.append("%s = ?" % key)
                 params.append(value)
