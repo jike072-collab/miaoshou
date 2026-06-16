@@ -28,6 +28,7 @@ from lib.local_config import config_status, ensure_local_runtime, load_config, l
 from lib.prompts import PRESETS, build_prompts
 from lib.real1688_adapter import Real1688Adapter, SOURCING_ACTIVE_STATUSES
 from lib.text_gateway import TextGatewayError, localize
+from lib.title_cleaner import TitleCleaner
 
 
 ROOT = Path(__file__).resolve().parent
@@ -39,6 +40,7 @@ DB = Database(DATA_DIR / "workbench.db")
 AUTOMATION = AutomationEngine(DB, DATA_DIR)
 BROWSER = BrowserManager(DB, DATA_DIR)
 SOURCING = Real1688Adapter(DB, DATA_DIR, BROWSER)
+TITLE_CLEANER = TitleCleaner()
 WORKBENCH_TOKEN = load_or_create_token(DATA_DIR)
 RUN_LOCK = threading.Lock()
 ACTIVE_RUNS = set()
@@ -315,6 +317,8 @@ def candidate_precheck_signature(candidate):
     images = candidate.get("images") or []
     values = [
         candidate.get("title") or "",
+        candidate.get("clean_title") or "",
+        str(candidate.get("title_cleaned_at") or 0),
         candidate.get("category") or "",
         candidate.get("supplier_name") or "",
         candidate.get("sales_text") or "",
@@ -372,7 +376,7 @@ def candidate_risk_hits(candidate):
 
 
 def candidate_title_quality(candidate):
-    title = str((candidate or {}).get("title") or "").strip()
+    title = candidate_display_title(candidate)
     cleaned = clean_title_for_dedupe(title)
     if not title:
         return False, "标题缺失"
@@ -384,8 +388,77 @@ def candidate_title_quality(candidate):
 
 
 def candidate_title_needs_clean(candidate):
+    clean_title = candidate_clean_title(candidate)
+    if clean_title:
+        return TITLE_CLEANER.has_supply_or_platform_terms(clean_title) or text_has_any(clean_title, TITLE_CLEAN_NOISE)
     title = str((candidate or {}).get("title") or "").strip()
-    return text_has_any(title, TITLE_CLEAN_NOISE)
+    return text_has_any(title, TITLE_CLEAN_NOISE) or TITLE_CLEANER.has_supply_or_platform_terms(title)
+
+
+def candidate_clean_title(candidate):
+    candidate = candidate or {}
+    return str(candidate.get("clean_title") or "").strip()
+
+
+def candidate_display_title(candidate):
+    candidate = candidate or {}
+    return candidate_clean_title(candidate) or str(candidate.get("title") or "").strip()
+
+
+def title_clean_record_payload(candidate, result, product_id=""):
+    return {
+        "candidate_id": (candidate or {}).get("id") or "",
+        "product_id": product_id or "",
+        "original_title": result.get("original_title") or "",
+        "clean_title": result.get("clean_title") or "",
+        "removed_terms": result.get("removed_terms") or [],
+        "risk_terms": result.get("risk_terms") or [],
+        "status": result.get("status") or "title_cleaned",
+        "cleaned_at": result.get("cleaned_at") or int(time.time()),
+    }
+
+
+def clean_candidate_title(candidate_id, persist=True):
+    candidate = DB.get_candidate(candidate_id)
+    if not candidate:
+        raise ValueError("候选商品不存在")
+    result = TITLE_CLEANER.clean(candidate.get("title") or "")
+    cleaned_at = int(time.time())
+    result["cleaned_at"] = cleaned_at
+    if persist:
+        DB.update_candidate(candidate_id, {
+            "clean_title": result["clean_title"],
+            "title_clean_removed_terms": result["removed_terms"],
+            "title_clean_risk_terms": result["risk_terms"],
+            "title_cleaned_at": cleaned_at,
+            "precheck_status": "",
+            "precheck_reason": "",
+            "precheck_reasons": [],
+            "precheck_details": {},
+            "precheck_checked_at": None,
+        })
+        if hasattr(DB, "save_title_cleaning_record"):
+            DB.save_title_cleaning_record(title_clean_record_payload(candidate, result))
+    return result
+
+
+def clean_titles_for_candidates(candidate_ids=None):
+    ids = candidate_ids or [item["id"] for item in DB.list_candidates()]
+    items, blocked = [], []
+    for candidate_id in ids:
+        try:
+            result = clean_candidate_title(candidate_id)
+            precheck = precheck_candidates([candidate_id])
+            summary = (precheck.get("items") or [candidate_summary(DB.get_candidate(candidate_id))])[0]
+            items.append({**result, "candidate": summary})
+        except Exception as exc:
+            candidate = DB.get_candidate(candidate_id)
+            blocked.append({
+                "id": candidate_id,
+                "title": (candidate or {}).get("title") or candidate_id,
+                "error": str(exc),
+            })
+    return {"items": items, "blocked": blocked, "cleaned": len(items)}
 
 
 def current_season_fit_status(candidate, month=None):
@@ -661,6 +734,12 @@ def candidate_summary(candidate):
     candidate["precheckDetails"] = precheck.get("precheck_details") or {}
     candidate["precheckCheckedAt"] = precheck.get("precheck_checked_at")
     candidate["precheckPersisted"] = bool(precheck.get("persisted"))
+    candidate["cleanTitle"] = candidate_clean_title(candidate)
+    candidate["displayTitle"] = candidate_display_title(candidate)
+    candidate["titleCleanRemovedTerms"] = candidate.get("title_clean_removed_terms") or []
+    candidate["titleCleanRiskTerms"] = candidate.get("title_clean_risk_terms") or []
+    candidate["titleCleanedAt"] = candidate.get("title_cleaned_at")
+    candidate["titleNeedsClean"] = precheck.get("precheck_details", {}).get("titleNeedsClean", False)
     candidate["seaFitStatus"] = precheck.get("sea_fit_status") or ""
     candidate["seasonFitStatus"] = precheck.get("season_fit_status") or ""
     candidate["precheckBlocked"] = precheck_status in PRECHECK_BLOCK_STATUSES and precheck_status != "not_checked"
@@ -1224,6 +1303,20 @@ def collect_qualified_candidates(candidate_ids, markets=None, review=False):
                 "error": "重复候选已跳过，不进入自动采集",
             })
             continue
+        if not summary.get("cleanTitle"):
+            try:
+                clean_candidate_title(candidate["id"])
+                candidate = DB.get_candidate(candidate["id"])
+                summary = candidate_summary(candidate)
+            except Exception as exc:
+                blocked.append({
+                    "id": candidate["id"],
+                    "title": summary.get("title") or summary.get("source_product_id") or candidate["id"],
+                    "precheckStatus": summary.get("precheckStatus") or "needs_title_clean",
+                    "precheckReason": summary.get("precheckReason") or "",
+                    "error": str(exc),
+                })
+                continue
         precheck_result = precheck_candidates([candidate["id"]])
         prechecked = (precheck_result.get("items") or [{}])[0]
         precheck_status = prechecked.get("precheckStatus") or "not_checked"
@@ -2209,12 +2302,16 @@ def ensure_product_from_candidate(candidate_id):
     existing = DB.row("SELECT id FROM products WHERE candidate_id=? OR (source_product_id!='' AND source_product_id=?) LIMIT 1", (candidate_id, candidate.get("source_product_id") or ""))
     if existing:
         return DB.get_product(existing["id"])
+    if not candidate_clean_title(candidate):
+        clean_candidate_title(candidate_id)
+        candidate = DB.get_candidate(candidate_id)
     images = candidate.get("images") or []
+    product_title = candidate_display_title(candidate) or "1688商品 %s" % (candidate.get("source_product_id") or "")
     product = DB.save_product({
         "candidateId": candidate_id,
         "sourceProductId": candidate.get("source_product_id") or "",
         "sourceUrl": candidate.get("source_url") or "",
-        "title": candidate.get("title") or "1688商品 %s" % (candidate.get("source_product_id") or ""),
+        "title": product_title,
         "category": candidate.get("category") or "",
         "sourcePrice": candidate.get("source_price") or 0,
         "costPrice": candidate.get("source_price") or 0,
@@ -2223,6 +2320,16 @@ def ensure_product_from_candidate(candidate_id):
         "mainImage": images[0] if images else "",
         "status": "待图片审核",
     })
+    if hasattr(DB, "save_title_cleaning_record"):
+        DB.save_title_cleaning_record({
+            "candidate_id": candidate_id,
+            "product_id": product["id"],
+            "original_title": candidate.get("title") or "",
+            "clean_title": product_title,
+            "removed_terms": candidate.get("title_clean_removed_terms") or [],
+            "risk_terms": candidate.get("title_clean_risk_terms") or [],
+            "cleaned_at": candidate.get("title_cleaned_at") or int(time.time()),
+        })
     create_market_versions(product["id"])
     return product
 
@@ -2231,11 +2338,12 @@ def register_collection_box_record(candidate, run=None, product=None):
     if not candidate:
         return None
     collected_at = int(time.time())
+    clean_title = (product or {}).get("title") or candidate_display_title(candidate) or candidate.get("title") or ""
     return DB.save_collection_box_record({
         "candidate_id": candidate.get("id") or "",
         "offer_id": candidate.get("source_product_id") or "",
         "source_url": candidate.get("source_url") or "",
-        "clean_title": candidate.get("title") or "",
+        "clean_title": clean_title,
         "image_status": "approved" if (product or {}).get("mainImage") or (candidate.get("images") or []) else "pending",
         "collected_at": collected_at,
         "miaoshou_status": (product or {}).get("status") or candidate.get("status") or "",
@@ -3597,6 +3705,20 @@ class AppHandler(BaseHTTPRequestHandler):
             if response["blocked"] and not response["items"]:
                 return self.send_json(response, HTTPStatus.BAD_REQUEST)
             return self.send_json(response)
+
+        if path == "/api/products/clean-title":
+            ids = candidate_ids_from_payload(payload)
+            title = str(payload.get("title") or "").strip()
+            if ids:
+                result = clean_titles_for_candidates(ids)
+                return self.send_json(result)
+            if not title:
+                raise ValueError("请提供 title 或 candidateIds")
+            result = TITLE_CLEANER.clean(title)
+            if hasattr(DB, "save_title_cleaning_record"):
+                result["cleaned_at"] = int(time.time())
+                DB.save_title_cleaning_record(title_clean_record_payload({}, result))
+            return self.send_json(result)
 
         if path == "/api/collections/bulk-action":
             return self.send_json(bulk_collection_action(payload))

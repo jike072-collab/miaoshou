@@ -72,6 +72,10 @@ class Database:
             sea_fit_status TEXT NOT NULL DEFAULT '',
             season_fit_status TEXT NOT NULL DEFAULT '',
             precheck_checked_at INTEGER,
+            clean_title TEXT NOT NULL DEFAULT '',
+            title_clean_removed_terms TEXT NOT NULL DEFAULT '[]',
+            title_clean_risk_terms TEXT NOT NULL DEFAULT '[]',
+            title_cleaned_at INTEGER,
             status TEXT NOT NULL DEFAULT '待评估',
             collection_channel TEXT,
             collected_at INTEGER,
@@ -101,6 +105,18 @@ class Database:
             collected_at INTEGER NOT NULL,
             miaoshou_status TEXT NOT NULL DEFAULT '',
             run_id TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS title_cleaning_records (
+            id TEXT PRIMARY KEY,
+            candidate_id TEXT,
+            product_id TEXT NOT NULL DEFAULT '',
+            original_title TEXT NOT NULL DEFAULT '',
+            clean_title TEXT NOT NULL DEFAULT '',
+            removed_terms TEXT NOT NULL DEFAULT '[]',
+            risk_terms TEXT NOT NULL DEFAULT '[]',
+            status TEXT NOT NULL DEFAULT 'title_cleaned',
+            cleaned_at INTEGER NOT NULL,
             created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS evaluations (
@@ -276,6 +292,10 @@ class Database:
                 ("sea_fit_status", "TEXT NOT NULL DEFAULT ''"),
                 ("season_fit_status", "TEXT NOT NULL DEFAULT ''"),
                 ("precheck_checked_at", "INTEGER"),
+                ("clean_title", "TEXT NOT NULL DEFAULT ''"),
+                ("title_clean_removed_terms", "TEXT NOT NULL DEFAULT '[]'"),
+                ("title_clean_risk_terms", "TEXT NOT NULL DEFAULT '[]'"),
+                ("title_cleaned_at", "INTEGER"),
             ):
                 if name not in candidate_columns:
                     connection.execute("ALTER TABLE candidates ADD COLUMN %s %s" % (name, definition))
@@ -375,7 +395,7 @@ class Database:
         if row is None:
             return None
         item = dict(row)
-        for key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "precheck_details", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics"):
+        for key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "precheck_details", "title_clean_removed_terms", "title_clean_risk_terms", "removed_terms", "risk_terms", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics"):
             if key in item and isinstance(item[key], str):
                 try:
                     item[key] = json.loads(item[key])
@@ -474,13 +494,16 @@ class Database:
             "dedupe_checked_at", "status", "collection_channel", "collected_at",
             "precheck_status", "precheck_reason", "precheck_reasons", "precheck_details",
             "sea_fit_status", "season_fit_status", "precheck_checked_at",
+            "clean_title", "title_clean_removed_terms", "title_clean_risk_terms",
+            "title_cleaned_at",
         }
         columns = []
         params = []
+        title_changed = "title" in values and "clean_title" not in values
         for key, value in values.items():
             if key not in allowed:
                 continue
-            if key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons"):
+            if key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "title_clean_removed_terms", "title_clean_risk_terms"):
                 value = json.dumps(value or [], ensure_ascii=False)
             if key == "precheck_details":
                 value = json.dumps(value or {}, ensure_ascii=False)
@@ -488,6 +511,15 @@ class Database:
                 value = int(bool(value))
             columns.append("%s = ?" % key)
             params.append(value)
+        if title_changed:
+            for key, value in (
+                ("clean_title", ""),
+                ("title_clean_removed_terms", json.dumps([], ensure_ascii=False)),
+                ("title_clean_risk_terms", json.dumps([], ensure_ascii=False)),
+                ("title_cleaned_at", None),
+            ):
+                columns.append("%s = ?" % key)
+                params.append(value)
         if not columns:
             return self.get_candidate(candidate_id)
         columns.append("updated_at = ?")
@@ -683,6 +715,40 @@ class Database:
 
     def list_collection_box_records(self):
         return self.rows("SELECT * FROM collection_box_records ORDER BY collected_at DESC, created_at DESC")
+
+    def save_title_cleaning_record(self, values):
+        now = int(time.time())
+        record_id = str(values.get("id") or uuid.uuid4().hex)
+        cleaned_at = int(values.get("cleaned_at") or values.get("cleanedAt") or now)
+        payload = (
+            record_id,
+            values.get("candidate_id") or values.get("candidateId") or "",
+            values.get("product_id") or values.get("productId") or "",
+            values.get("original_title") or values.get("originalTitle") or "",
+            values.get("clean_title") or values.get("cleanTitle") or "",
+            json.dumps(values.get("removed_terms") or values.get("removedTerms") or [], ensure_ascii=False),
+            json.dumps(values.get("risk_terms") or values.get("riskTerms") or [], ensure_ascii=False),
+            values.get("status") or "title_cleaned",
+            cleaned_at,
+            now,
+        )
+        with self.lock, self.connect() as connection:
+            connection.execute(
+                """INSERT INTO title_cleaning_records(
+                    id,candidate_id,product_id,original_title,clean_title,removed_terms,
+                    risk_terms,status,cleaned_at,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                payload,
+            )
+        return self.row("SELECT * FROM title_cleaning_records WHERE id=?", (record_id,))
+
+    def list_title_cleaning_records(self, candidate_id=None):
+        if candidate_id:
+            return self.rows(
+                "SELECT * FROM title_cleaning_records WHERE candidate_id=? ORDER BY cleaned_at DESC, created_at DESC",
+                (candidate_id,),
+            )
+        return self.rows("SELECT * FROM title_cleaning_records ORDER BY cleaned_at DESC, created_at DESC")
 
     def create_run(self, kind, steps, batch_id=None, candidate_id=None, status="queued", context=None):
         run_id = uuid.uuid4().hex

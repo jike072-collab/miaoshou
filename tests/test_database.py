@@ -79,6 +79,44 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(updated["sea_fit_status"], "sea_fit_good")
         self.assertEqual(updated["season_fit_status"], "season_fit_good")
 
+    def test_candidate_can_store_title_cleaning_fields_and_records(self):
+        candidate = self.db.import_candidates(["https://detail.1688.com/offer/123456.html"])[0]
+        updated = self.db.update_candidate(candidate["id"], {
+            "clean_title": "Breathable Summer Sports Shoes",
+            "title_clean_removed_terms": ["跨境", "外贸"],
+            "title_clean_risk_terms": ["高仿"],
+            "title_cleaned_at": 123,
+        })
+        record = self.db.save_title_cleaning_record({
+            "candidate_id": candidate["id"],
+            "original_title": "跨境外贸高仿运动鞋",
+            "clean_title": "Sports Shoes",
+            "removed_terms": ["跨境", "外贸"],
+            "risk_terms": ["高仿"],
+            "cleaned_at": 456,
+        })
+
+        records = self.db.list_title_cleaning_records(candidate["id"])
+        self.assertEqual(updated["clean_title"], "Breathable Summer Sports Shoes")
+        self.assertEqual(updated["title_clean_removed_terms"], ["跨境", "外贸"])
+        self.assertEqual(updated["title_clean_risk_terms"], ["高仿"])
+        self.assertEqual(record["risk_terms"], ["高仿"])
+        self.assertEqual(records[0]["clean_title"], "Sports Shoes")
+
+    def test_candidate_title_change_invalidates_clean_title(self):
+        candidate = self.db.import_candidates(["https://detail.1688.com/offer/123456.html"])[0]
+        self.db.update_candidate(candidate["id"], {
+            "clean_title": "Breathable Sports Shoes",
+            "title_clean_removed_terms": ["跨境"],
+            "title_cleaned_at": 123,
+        })
+
+        updated = self.db.update_candidate(candidate["id"], {"title": "新的运动鞋标题"})
+
+        self.assertEqual(updated["clean_title"], "")
+        self.assertEqual(updated["title_clean_removed_terms"], [])
+        self.assertIsNone(updated["title_cleaned_at"])
+
     def test_product_round_trip(self):
         product = self.db.save_product({
             "title": "运动鞋", "sourceUrl": "https://example.com/p",

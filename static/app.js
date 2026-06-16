@@ -9,6 +9,9 @@ const precheckLabels = {
   risk_blocked: "风险阻断",
   precheck_failed: "预检失败",
 };
+const titleCleanLabels = {
+  title_cleaned: "标题已清洗",
+};
 const seaFitLabels = {
   sea_fit_good: "SEA适配好",
   sea_fit_normal: "SEA一般",
@@ -104,6 +107,17 @@ function renderMissingHints(item) {
   return `<div class="missing-hints" title="${esc(detail)}">${visible}${more}</div>`;
 }
 
+function renderTitleCleanSummary(item) {
+  const cleanTitle = item.cleanTitle || item.displayTitle || item.title || "";
+  const removed = (item.titleCleanRemovedTerms || []).length ? item.titleCleanRemovedTerms.join("、") : "";
+  const risk = (item.titleCleanRiskTerms || []).length ? item.titleCleanRiskTerms.join("、") : "";
+  if (!cleanTitle || (!removed && !risk)) return '<span class="candidate-ready">未清洗</span>';
+  const pieces = [];
+  if (removed) pieces.push(`移除：${esc(removed)}`);
+  if (risk) pieces.push(`风险：${esc(risk)}`);
+  return `<div class="title-clean-summary"><strong>${esc(cleanTitle)}</strong><small>${pieces.join(" · ")}</small></div>`;
+}
+
 function renderCompleteness(item) {
   const completeness = item.dataCompleteness || { completed: 0, required: 9, percent: 0 };
   const percent = Math.max(0, Math.min(100, Number(completeness.percent || 0)));
@@ -189,6 +203,7 @@ function renderCandidateAccess(item) {
     <small>缺失 ${Number(item.missingFieldCount || 0)} 项</small>
     <small class="precheck-line">${esc(precheckReasons || "等待预检筛选")}</small>
     <small class="precheck-line">${esc(seaFitLabels[item.seaFitStatus] || item.seaFitStatus || "SEA待判")} · ${esc(seasonFitLabels[item.seasonFitStatus] || item.seasonFitStatus || "季节待判")}${detail.imageCount !== undefined ? ` · 图${Number(detail.imageCount || 0)}` : ""}</small>
+    ${item.cleanTitle ? `<small class="title-clean-line">${esc(item.cleanTitle)}</small>` : ""}
     ${item.duplicateSkipped ? `<small class="dedupe-line">${esc(item.dedupeStatusLabel || "重复跳过")}：${esc(item.dedupeReason || "重复候选")}</small>` : `<small class="dedupe-line">去重：${esc(item.dedupeStatusLabel || "新候选")}</small>`}
   </div>`;
 }
@@ -468,10 +483,10 @@ function renderCandidates() {
     ].filter(Boolean);
     tr.innerHTML = `
       <td><input class="candidate-check" type="checkbox" value="${esc(item.id)}"></td>
-      <td><div class="candidate-name"><strong>${esc(item.title || `1688商品 ${item.source_product_id || "待识别"}`)}</strong><a href="${esc(item.source_url)}" target="_blank" rel="noreferrer">${esc(item.source_product_id || "查看来源")}</a><div class="candidate-source-meta">${sourceMeta.map((meta) => `<span>${esc(meta)}</span>`).join("")}</div></div></td>
+      <td><div class="candidate-name"><strong>${esc(item.title || `1688商品 ${item.source_product_id || "待识别"}`)}</strong>${item.cleanTitle ? `<small class="clean-title-display">妙手标题：${esc(item.cleanTitle)}</small>` : ""}<a href="${esc(item.source_url)}" target="_blank" rel="noreferrer">${esc(item.source_product_id || "查看来源")}</a><div class="candidate-source-meta">${sourceMeta.map((meta) => `<span>${esc(meta)}</span>`).join("")}</div></div></td>
       <td><span>${esc(item.category || "待补充")}</span><small>¥${Number(item.source_price || 0).toFixed(2)} · ${Number(item.weight_g || 0)}g · SKU${item.sku_complete ? "完整" : "缺失"} · 图${images}</small>${renderCompleteness(item)}<small>风险：${esc(riskFlags)}</small></td>
       <td>${renderFieldStatus(item)}</td>
-      <td>${renderMissingHints(item)}<button class="inline-next" data-candidate-next="${esc(item.id)}" type="button">${esc(item.nextAction || "补数据")}</button><small class="market-summary-line">${esc(item.marketSummary?.nextAction || "")}${item.dataCompleteness?.marketDataComplete ? " · 市场数据完整" : " · 市场数据待补"}${item.marketSummary?.qualifiedCount ? ` · 达标 ${item.marketSummary.qualifiedCount} 国` : ""}</small></td>
+      <td>${renderMissingHints(item)}${renderTitleCleanSummary(item)}<button class="inline-next" data-candidate-next="${esc(item.id)}" type="button">${esc(item.precheckStatus === "needs_title_clean" ? "清洗标题" : item.nextAction || "补数据")}</button><small class="market-summary-line">${esc(item.marketSummary?.nextAction || "")}${item.dataCompleteness?.marketDataComplete ? " · 市场数据完整" : " · 市场数据待补"}${item.marketSummary?.qualifiedCount ? ` · 达标 ${item.marketSummary.qualifiedCount} 国` : ""}</small></td>
       ${scores}
       <td>${renderCandidateAccess(item)}</td>
       <td><span class="status-chip status-${esc(item.status)}">${esc(item.status)}</span></td>
@@ -485,6 +500,20 @@ function renderCandidates() {
 async function handleCandidateNext(button) {
   const item = state.candidates.find((candidate) => candidate.id === button.dataset.candidateNext);
   if (!item) return;
+  if (item.precheckStatus === "needs_title_clean") {
+    button.disabled = true;
+    try {
+      const data = await api("/api/products/clean-title", { method: "POST", body: JSON.stringify({ candidateIds: [item.id] }) });
+      const result = (data.items || [])[0] || {};
+      notify(result.clean_title ? `已清洗标题：${result.clean_title}` : "标题已清洗");
+      await loadAll();
+    } catch (error) {
+      notify(error.message, "error");
+    } finally {
+      button.disabled = false;
+    }
+    return;
+  }
   if (item.nextAction === "从来源补全") {
     button.disabled = true;
     try {
@@ -1134,6 +1163,20 @@ $("#precheck-candidates").addEventListener("click", async () => {
     notify(`预检完成：通过 ${Number(summary.passed || 0)}，风险 ${Number(summary.riskBlocked || 0)}，低优先级 ${Number(summary.lowPrioritySkipped || 0)}，待修复 ${Number(summary.failed || 0)}`, summary.riskBlocked || summary.failed ? "error" : "success");
     await loadAll();
   } catch (error) { notify(error.message, "error"); }
+});
+
+$("#clean-title-candidates").addEventListener("click", async () => {
+  const selected = selectedCandidates();
+  const ids = selected.length ? selected : filteredCandidates().filter((item) => item.precheckStatus === "needs_title_clean" || !item.cleanTitle).map((item) => item.id);
+  if (!ids.length) return notify("当前没有需要清洗的候选标题", "error");
+  try {
+    const data = await api("/api/products/clean-title", { method: "POST", body: JSON.stringify({ candidateIds: ids }) });
+    const blocked = data.blocked?.length || 0;
+    notify(blocked ? `已清洗 ${data.cleaned || 0} 个，${blocked} 个失败` : `已清洗 ${data.cleaned || 0} 个标题`, blocked ? "error" : "success");
+    await loadAll();
+  } catch (error) {
+    notify(error.message, "error");
+  }
 });
 
 async function sourcingAction(action, message) {

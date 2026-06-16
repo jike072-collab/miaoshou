@@ -9,6 +9,7 @@ from urllib.parse import quote
 from lib.automation import source_product_id
 from lib.browser_manager import detect_alibaba_login, detect_verification
 from lib.local_config import load_config
+from lib.title_cleaner import TitleCleaner
 
 
 SOURCING_ACTIVE_STATUSES = {
@@ -33,6 +34,7 @@ class Real1688Adapter:
         self.browser = browser_manager
         self.dedupe_callback = None
         self.precheck_callback = None
+        self.title_cleaner = TitleCleaner()
 
     def config(self):
         return load_config(self.data_dir)
@@ -263,6 +265,24 @@ class Real1688Adapter:
                     "status": "待评估",
                 }
                 self.db.update_candidate(candidate["id"], updates)
+                if self.config().get("enable_title_clean", True):
+                    title_result = self.title_cleaner.clean(self.db.get_candidate(candidate["id"]).get("title") or "")
+                    cleaned_at = int(time.time())
+                    self.db.update_candidate(candidate["id"], {
+                        "clean_title": title_result["clean_title"],
+                        "title_clean_removed_terms": title_result["removed_terms"],
+                        "title_clean_risk_terms": title_result["risk_terms"],
+                        "title_cleaned_at": cleaned_at,
+                    })
+                    if hasattr(self.db, "save_title_cleaning_record"):
+                        self.db.save_title_cleaning_record({
+                            "candidate_id": candidate["id"],
+                            "original_title": title_result["original_title"],
+                            "clean_title": title_result["clean_title"],
+                            "removed_terms": title_result["removed_terms"],
+                            "risk_terms": title_result["risk_terms"],
+                            "cleaned_at": cleaned_at,
+                        })
                 duplicate_after_dedupe = False
                 if self.dedupe_callback:
                     dedupe = self.dedupe_callback([candidate["id"]])

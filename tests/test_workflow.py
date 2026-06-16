@@ -279,15 +279,57 @@ class WorkflowTest(unittest.TestCase):
 
         result = app.precheck_candidates([title_candidate["id"], image_candidate["id"]])
         statuses = {item["id"]: item["precheckStatus"] for item in result["items"]}
-        title_collection = app.collect_qualified_candidates([title_candidate["id"]])
+        with patch("app.AUTOMATION.create_collection_run", side_effect=lambda item: app.DB.create_run("collection", ["采集"], candidate_id=item["id"])), \
+             patch("app.enqueue_automation_run", return_value=True):
+            title_collection = app.collect_qualified_candidates([title_candidate["id"]])
         image_collection = app.collect_qualified_candidates([image_candidate["id"]])
+        cleaned = app.DB.get_candidate(title_candidate["id"])
 
         self.assertEqual(statuses[title_candidate["id"]], "needs_title_clean")
         self.assertEqual(statuses[image_candidate["id"]], "needs_image_check")
-        self.assertEqual(title_collection["items"], [])
+        self.assertEqual(len(title_collection["items"]), 1)
         self.assertEqual(image_collection["items"], [])
-        self.assertEqual(title_collection["blocked"][0]["precheckStatus"], "needs_title_clean")
+        self.assertEqual(cleaned["clean_title"], "Breathable Sports Shoes")
+        self.assertEqual(app.candidate_summary(cleaned)["precheckStatus"], "precheck_passed")
         self.assertEqual(image_collection["blocked"][0]["precheckStatus"], "needs_image_check")
+
+    def test_clean_title_api_for_raw_title_and_candidate(self):
+        handler = type("FakeHandler", (), {"send_json": lambda self, payload, status=200: {"payload": payload, "status": status}})()
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710012.html")
+        app.DB.update_candidate(candidate["id"], {"title": "跨境外贸一键代发夏季透气运动鞋厂家直销"})
+
+        raw_result = app.AppHandler.route_post(handler, "/api/products/clean-title", {"title": "跨境外贸一键代发夏季透气运动鞋厂家直销"})["payload"]
+        candidate_result = app.AppHandler.route_post(handler, "/api/products/clean-title", {"candidateIds": [candidate["id"]]})["payload"]
+        refreshed = app.DB.get_candidate(candidate["id"])
+
+        self.assertEqual(raw_result["clean_title"], "Breathable Summer Sports Shoes")
+        self.assertEqual(raw_result["removed_terms"], ["跨境", "外贸", "一键代发", "厂家直销"])
+        self.assertEqual(candidate_result["cleaned"], 1)
+        self.assertEqual(refreshed["clean_title"], "Breathable Summer Sports Shoes")
+        self.assertTrue(app.DB.list_title_cleaning_records(candidate["id"]))
+
+    def test_product_and_collection_box_use_clean_title(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710013.html")
+        app.DB.update_candidate(candidate["id"], {"title": "跨境外贸一键代发夏季透气运动鞋厂家直销"})
+        app.clean_candidate_title(candidate["id"])
+
+        product = app.ensure_product_from_candidate(candidate["id"])
+        record = app.register_collection_box_record(app.DB.get_candidate(candidate["id"]), product=product)
+
+        self.assertEqual(product["title"], "Breathable Summer Sports Shoes")
+        self.assertEqual(record["clean_title"], "Breathable Summer Sports Shoes")
+
+    def test_high_risk_title_remains_blocked_after_cleaning(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710014.html")
+        app.DB.update_candidate(candidate["id"], {"title": "跨境高仿原单透气运动鞋"})
+
+        result = app.clean_titles_for_candidates([candidate["id"]])
+        collection = app.collect_qualified_candidates([candidate["id"]])
+
+        self.assertEqual(result["items"][0]["risk_terms"], ["高仿", "原单"])
+        self.assertEqual(result["items"][0]["candidate"]["precheckStatus"], "risk_blocked")
+        self.assertEqual(collection["items"], [])
+        self.assertEqual(collection["blocked"][0]["precheckStatus"], "risk_blocked")
 
     def test_precheck_low_priority_and_filters_statuses(self):
         candidate = self.collectable_candidate("https://detail.1688.com/offer/710004.html")

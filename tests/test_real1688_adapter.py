@@ -82,6 +82,8 @@ class Real1688AdapterTest(unittest.TestCase):
         self.assertEqual(candidate["search_page"], 1)
         self.assertEqual(candidate["search_rank"], 4)
         self.assertEqual(candidate["images"], ["https://cbu01.alicdn.com/img/test.jpg"])
+        self.assertEqual(candidate["clean_title"], "Breathable Summer Sports Shoes")
+        self.assertTrue(self.db.list_title_cleaning_records(candidate["id"]))
 
     def test_duplicate_search_result_is_counted_as_skipped(self):
         item = {

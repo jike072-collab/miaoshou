@@ -275,11 +275,18 @@ class AutomationEngine:
         }
         if run["candidate_id"]:
             candidate = self.db.get_candidate(run["candidate_id"])
+            title = candidate.get("clean_title") or candidate.get("title") or ""
             payload.update({
                 "url": candidate["source_url"], "productId": candidate.get("source_product_id") or "",
                 "collectTexts": self.db.setting("automation.plugin_collect_texts", ["采集此产品", "妙手采集"]),
                 "successTexts": self.db.setting("automation.plugin_success_texts", ["采集成功", "已采集"]),
-                "variables": {"sourceUrl": candidate["source_url"], "sourceProductId": candidate.get("source_product_id") or ""},
+                "variables": {
+                    "sourceUrl": candidate["source_url"],
+                    "sourceProductId": candidate.get("source_product_id") or "",
+                    "title": title,
+                    "cleanTitle": candidate.get("clean_title") or title,
+                    "originalTitle": candidate.get("title") or "",
+                },
             })
         elif run["batch_id"]:
             batch = self.db.row("SELECT * FROM batches WHERE id=?", (run["batch_id"],))
