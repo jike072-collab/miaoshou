@@ -32,6 +32,7 @@ class Real1688Adapter:
         self.data_dir = Path(data_dir)
         self.browser = browser_manager
         self.dedupe_callback = None
+        self.precheck_callback = None
 
     def config(self):
         return load_config(self.data_dir)
@@ -270,6 +271,11 @@ class Real1688Adapter:
                     skipped += 1
                 else:
                     saved += 1
+                if self.precheck_callback:
+                    try:
+                        self.precheck_callback([candidate["id"]])
+                    except Exception:
+                        failed += 1
             except (TypeError, ValueError):
                 failed += 1
         return saved, skipped, failed

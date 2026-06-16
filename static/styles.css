@@ -807,6 +807,33 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   background: var(--ink);
 }
 .candidate-queue-tab.active strong { color: white; }
+.precheck-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--line);
+  background: #fffdf9;
+}
+.precheck-summary article {
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: white;
+}
+.precheck-summary span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+}
+.precheck-summary strong {
+  display: block;
+  margin-top: 6px;
+  color: var(--ink);
+  font-size: 22px;
+}
+.precheck-summary .precheck-danger strong { color: var(--danger); }
+.precheck-summary .precheck-warn strong { color: #9a5c11; }
 .qualified-pool { display: grid; gap: 14px; padding: 0 22px 18px; }
 .pool-metrics { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }
 .pool-metrics article {
@@ -918,11 +945,17 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 }
 .candidate-access .ok { color: #236847; background: #e8f5ec; }
 .candidate-access .bad { color: #8a3f1c; background: #fff1e8; }
+.candidate-access .warn { color: #8a5b1d; background: #fff4d8; }
 .candidate-access small { color: var(--muted); font-size: 9px; }
-.candidate-access .dedupe-line {
+.candidate-access .dedupe-line,
+.candidate-access .precheck-line {
   color: #786c55;
   font-weight: 800;
   line-height: 1.45;
+}
+.candidate-access .precheck-line {
+  max-width: 180px;
+  color: #5f6a62;
 }
 .missing-hints {
   display: flex;
@@ -1589,6 +1622,7 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   .sourcing-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .qualified-item { grid-template-columns: 1fr; }
   .pool-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .precheck-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .workflow-steps { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
   .image-workbench-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .image-workbench-metrics article:nth-child(3n) { border-right: 0; }
@@ -1618,6 +1652,7 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   .image-workbench-metrics article:nth-child(n + 3) { border-top: 1px solid var(--line); }
   .image-failure-strip button { grid-template-columns: 1fr; gap: 4px; }
   .pool-metrics { grid-template-columns: 1fr; }
+  .precheck-summary { grid-template-columns: 1fr; }
   .qualified-item { grid-template-columns: 1fr; }
   .workflow-heading { align-items: flex-start; flex-direction: column; }
   .workflow-steps { grid-template-columns: 1fr; }

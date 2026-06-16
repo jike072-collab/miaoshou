@@ -1,5 +1,24 @@
 const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, sourcing: { run: {}, config: {}, status: "idle" }, batchPreview: null, workflow: [], settings: {}, browserStatus: {}, platformStatus: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null, localStatus: {}, workbenchToken: "" };
 const markets = { MY: "马来西亚", PH: "菲律宾", SG: "新加坡", TH: "泰国", VN: "越南" };
+const precheckLabels = {
+  not_checked: "未预检",
+  precheck_passed: "预检通过",
+  needs_title_clean: "需清洗标题",
+  needs_image_check: "需图片检查",
+  low_priority_skipped: "低优先级跳过",
+  risk_blocked: "风险阻断",
+  precheck_failed: "预检失败",
+};
+const seaFitLabels = {
+  sea_fit_good: "SEA适配好",
+  sea_fit_normal: "SEA一般",
+  sea_fit_poor: "SEA较弱",
+};
+const seasonFitLabels = {
+  season_fit_good: "季节适配",
+  season_fit_normal: "季节一般",
+  season_fit_poor: "明显反季",
+};
 const workflowTargets = {
   import_candidates: "candidates",
   complete_product_data: "candidates",
@@ -104,6 +123,16 @@ function candidateQueueCounts() {
   };
 }
 
+function candidatePrecheckCounts() {
+  return {
+    passed: state.candidates.filter((item) => item.precheckStatus === "precheck_passed").length,
+    riskBlocked: state.candidates.filter((item) => item.precheckStatus === "risk_blocked").length,
+    lowPrioritySkipped: state.candidates.filter((item) => item.precheckStatus === "low_priority_skipped").length,
+    failed: state.candidates.filter((item) => ["precheck_failed", "needs_title_clean", "needs_image_check"].includes(item.precheckStatus)).length,
+    notChecked: state.candidates.filter((item) => !item.precheckStatus || item.precheckStatus === "not_checked").length,
+  };
+}
+
 function filteredCandidates() {
   if (state.candidateQueue === "all") return state.candidates;
   return state.candidates.filter((item) => item.queue === state.candidateQueue);
@@ -116,6 +145,19 @@ function renderCandidateQueues() {
   $("#queue-duplicate-skipped").textContent = counts.duplicate_skipped;
   $("#queue-all").textContent = counts.all;
   $$(".candidate-queue-tab").forEach((button) => button.classList.toggle("active", button.dataset.candidateQueue === state.candidateQueue));
+}
+
+function renderPrecheckSummary() {
+  const wrap = $("#candidate-precheck-summary");
+  if (!wrap) return;
+  const counts = candidatePrecheckCounts();
+  wrap.innerHTML = `
+    <article><span>预检通过</span><strong>${counts.passed}</strong></article>
+    <article class="${counts.riskBlocked ? "precheck-danger" : ""}"><span>风险阻断</span><strong>${counts.riskBlocked}</strong></article>
+    <article><span>低优先级跳过</span><strong>${counts.lowPrioritySkipped}</strong></article>
+    <article class="${counts.failed ? "precheck-warn" : ""}"><span>待修复/失败</span><strong>${counts.failed}</strong></article>
+    <article><span>未预检</span><strong>${counts.notChecked}</strong></article>
+  `;
 }
 
 function renderFieldStatus(item) {
@@ -136,10 +178,17 @@ function renderFieldStatus(item) {
 }
 
 function renderCandidateAccess(item) {
+  const precheckStatus = item.precheckStatus || "not_checked";
+  const precheckClass = precheckStatus === "precheck_passed" ? "ok" : ["risk_blocked", "precheck_failed"].includes(precheckStatus) ? "bad" : "warn";
+  const precheckReasons = item.precheckReasons?.length ? item.precheckReasons.slice(0, 2).join("；") : item.precheckReason || "";
+  const detail = item.precheckDetails || {};
   return `<div class="candidate-access">
     <span class="${item.isReadyToScore ? "ok" : "bad"}">可评分：${item.isReadyToScore ? "是" : "否"}</span>
     <span class="${item.canCollect ? "ok" : "bad"}">可采集：${item.canCollect ? "是" : "否"}</span>
+    <span class="${precheckClass}">预检：${esc(item.precheckStatusLabel || precheckLabels[precheckStatus] || precheckStatus)}</span>
     <small>缺失 ${Number(item.missingFieldCount || 0)} 项</small>
+    <small class="precheck-line">${esc(precheckReasons || "等待预检筛选")}</small>
+    <small class="precheck-line">${esc(seaFitLabels[item.seaFitStatus] || item.seaFitStatus || "SEA待判")} · ${esc(seasonFitLabels[item.seasonFitStatus] || item.seasonFitStatus || "季节待判")}${detail.imageCount !== undefined ? ` · 图${Number(detail.imageCount || 0)}` : ""}</small>
     ${item.duplicateSkipped ? `<small class="dedupe-line">${esc(item.dedupeStatusLabel || "重复跳过")}：${esc(item.dedupeReason || "重复候选")}</small>` : `<small class="dedupe-line">去重：${esc(item.dedupeStatusLabel || "新候选")}</small>`}
   </div>`;
 }
@@ -401,6 +450,7 @@ function renderCandidates() {
   const body = $("#candidate-table");
   body.innerHTML = "";
   renderCandidateQueues();
+  renderPrecheckSummary();
   const items = filteredCandidates();
   $("#candidate-empty").classList.toggle("hidden", items.length > 0);
   for (const item of items) {
@@ -1076,6 +1126,16 @@ $("#dedupe-candidates").addEventListener("click", async () => {
   } catch (error) { notify(error.message, "error"); }
 });
 
+$("#precheck-candidates").addEventListener("click", async () => {
+  try {
+    const ids = selectedCandidates();
+    const data = await api("/api/candidates/precheck", { method: "POST", body: JSON.stringify({ candidateIds: ids }) });
+    const summary = data.summary || {};
+    notify(`预检完成：通过 ${Number(summary.passed || 0)}，风险 ${Number(summary.riskBlocked || 0)}，低优先级 ${Number(summary.lowPrioritySkipped || 0)}，待修复 ${Number(summary.failed || 0)}`, summary.riskBlocked || summary.failed ? "error" : "success");
+    await loadAll();
+  } catch (error) { notify(error.message, "error"); }
+});
+
 async function sourcingAction(action, message) {
   const button = $(`#sourcing-${action}`);
   if (button) button.disabled = true;
@@ -1172,9 +1232,9 @@ $("#collect-qualified").addEventListener("click", async () => {
     const ids = selectedCandidates();
     const data = await api("/api/candidates/collect-qualified", { method: "POST", body: JSON.stringify({ candidateIds: ids }) });
     const blocked = data.blocked?.length || 0;
-    notify(data.items.length ? `已创建 ${data.items.length} 个妙手采集任务${blocked ? `，拦截 ${blocked} 个缺数据候选` : ""}` : "没有符合自动采集条件的候选", data.items.length && !blocked ? "success" : "error");
+    notify(data.items.length ? `已创建 ${data.items.length} 个妙手采集任务${blocked ? `，预检拦截 ${blocked} 个候选` : ""}` : "没有符合自动采集条件的候选", data.items.length && !blocked ? "success" : "error");
     await loadAll();
-  } catch (error) { notify(error.blocked?.length ? `已拦截 ${error.blocked.length} 个缺数据候选` : error.message, "error"); }
+  } catch (error) { notify(error.blocked?.length ? `已预检拦截 ${error.blocked.length} 个候选` : error.message, "error"); }
 });
 
 $("#collection-start").addEventListener("click", () => collectionBulkAction("start"));

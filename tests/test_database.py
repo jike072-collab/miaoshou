@@ -61,6 +61,24 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(record["miaoshou_status"], "采集箱")
         self.assertEqual(records[0]["id"], record["id"])
 
+    def test_candidate_can_store_precheck_fields(self):
+        candidate = self.db.import_candidates(["https://detail.1688.com/offer/123456.html"])[0]
+        updated = self.db.update_candidate(candidate["id"], {
+            "precheck_status": "precheck_passed",
+            "precheck_reason": "通过预检",
+            "precheck_reasons": ["通过预检"],
+            "precheck_details": {"seaScore": 6, "missingBasicFields": []},
+            "sea_fit_status": "sea_fit_good",
+            "season_fit_status": "season_fit_good",
+            "precheck_checked_at": 123,
+        })
+
+        self.assertEqual(updated["precheck_status"], "precheck_passed")
+        self.assertEqual(updated["precheck_reasons"], ["通过预检"])
+        self.assertEqual(updated["precheck_details"]["seaScore"], 6)
+        self.assertEqual(updated["sea_fit_status"], "sea_fit_good")
+        self.assertEqual(updated["season_fit_status"], "season_fit_good")
+
     def test_product_round_trip(self):
         product = self.db.save_product({
             "title": "运动鞋", "sourceUrl": "https://example.com/p",

@@ -65,6 +65,13 @@ class Database:
             dedupe_reason TEXT NOT NULL DEFAULT '',
             dedupe_reasons TEXT NOT NULL DEFAULT '[]',
             dedupe_checked_at INTEGER,
+            precheck_status TEXT NOT NULL DEFAULT '',
+            precheck_reason TEXT NOT NULL DEFAULT '',
+            precheck_reasons TEXT NOT NULL DEFAULT '[]',
+            precheck_details TEXT NOT NULL DEFAULT '{}',
+            sea_fit_status TEXT NOT NULL DEFAULT '',
+            season_fit_status TEXT NOT NULL DEFAULT '',
+            precheck_checked_at INTEGER,
             status TEXT NOT NULL DEFAULT '待评估',
             collection_channel TEXT,
             collected_at INTEGER,
@@ -262,6 +269,13 @@ class Database:
                 ("dedupe_reason", "TEXT NOT NULL DEFAULT ''"),
                 ("dedupe_reasons", "TEXT NOT NULL DEFAULT '[]'"),
                 ("dedupe_checked_at", "INTEGER"),
+                ("precheck_status", "TEXT NOT NULL DEFAULT ''"),
+                ("precheck_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("precheck_reasons", "TEXT NOT NULL DEFAULT '[]'"),
+                ("precheck_details", "TEXT NOT NULL DEFAULT '{}'"),
+                ("sea_fit_status", "TEXT NOT NULL DEFAULT ''"),
+                ("season_fit_status", "TEXT NOT NULL DEFAULT ''"),
+                ("precheck_checked_at", "INTEGER"),
             ):
                 if name not in candidate_columns:
                     connection.execute("ALTER TABLE candidates ADD COLUMN %s %s" % (name, definition))
@@ -361,7 +375,7 @@ class Database:
         if row is None:
             return None
         item = dict(row)
-        for key in ("risk_flags", "images", "dedupe_reasons", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics"):
+        for key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons", "precheck_details", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics"):
             if key in item and isinstance(item[key], str):
                 try:
                     item[key] = json.loads(item[key])
@@ -458,14 +472,18 @@ class Database:
             "dispatch_hours", "weight_g", "image_count", "sku_complete",
             "risk_flags", "images", "dedupe_status", "dedupe_reason", "dedupe_reasons",
             "dedupe_checked_at", "status", "collection_channel", "collected_at",
+            "precheck_status", "precheck_reason", "precheck_reasons", "precheck_details",
+            "sea_fit_status", "season_fit_status", "precheck_checked_at",
         }
         columns = []
         params = []
         for key, value in values.items():
             if key not in allowed:
                 continue
-            if key in ("risk_flags", "images", "dedupe_reasons"):
+            if key in ("risk_flags", "images", "dedupe_reasons", "precheck_reasons"):
                 value = json.dumps(value or [], ensure_ascii=False)
+            if key == "precheck_details":
+                value = json.dumps(value or {}, ensure_ascii=False)
             if key == "sku_complete":
                 value = int(bool(value))
             columns.append("%s = ?" % key)

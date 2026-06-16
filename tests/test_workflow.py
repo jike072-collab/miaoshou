@@ -34,8 +34,14 @@ class WorkflowTest(unittest.TestCase):
             "supplier_years": 4,
             "dispatch_hours": 24,
             "image_count": 4,
+            "images": [
+                "https://example.com/shoe-a.jpg",
+                "https://example.com/shoe-b.jpg",
+                "https://example.com/shoe-c.jpg",
+            ],
             "sku_complete": True,
         })
+        app.precheck_candidates([candidate["id"]])
         app.DB.save_evaluations(candidate["id"], [{
             "market": "MY",
             "demand_score": 82,
@@ -244,6 +250,89 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(collection["items"], [])
         self.assertEqual(collection["blocked"][0]["error"], "基础数据不完整，不能进入自动采集")
 
+    def test_precheck_blocks_high_risk_candidate_from_miaoshou_collection(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710001.html")
+        app.DB.update_candidate(candidate["id"], {
+            "title": "高仿 Nike 原单运动鞋",
+            "images": [
+                "https://example.com/risk-a.jpg",
+                "https://example.com/risk-b.jpg",
+                "https://example.com/risk-c.jpg",
+            ],
+        })
+
+        result = app.precheck_candidates([candidate["id"]])
+        summary = app.candidate_summary(app.DB.get_candidate(candidate["id"]))
+        collection = app.collect_qualified_candidates([candidate["id"]])
+
+        self.assertEqual(result["items"][0]["precheckStatus"], "risk_blocked")
+        self.assertIn("品牌侵权", summary["precheckReason"])
+        self.assertFalse(summary["canCollect"])
+        self.assertEqual(collection["items"], [])
+        self.assertEqual(collection["blocked"][0]["precheckStatus"], "risk_blocked")
+
+    def test_precheck_requires_title_clean_and_image_check_before_collection(self):
+        title_candidate = self.collectable_candidate("https://detail.1688.com/offer/710002.html")
+        image_candidate = self.collectable_candidate("https://detail.1688.com/offer/710003.html")
+        app.DB.update_candidate(title_candidate["id"], {"title": "厂家直销跨境爆款透气运动鞋"})
+        app.DB.update_candidate(image_candidate["id"], {"images": ["https://example.com/one.jpg"], "image_count": 1})
+
+        result = app.precheck_candidates([title_candidate["id"], image_candidate["id"]])
+        statuses = {item["id"]: item["precheckStatus"] for item in result["items"]}
+        title_collection = app.collect_qualified_candidates([title_candidate["id"]])
+        image_collection = app.collect_qualified_candidates([image_candidate["id"]])
+
+        self.assertEqual(statuses[title_candidate["id"]], "needs_title_clean")
+        self.assertEqual(statuses[image_candidate["id"]], "needs_image_check")
+        self.assertEqual(title_collection["items"], [])
+        self.assertEqual(image_collection["items"], [])
+        self.assertEqual(title_collection["blocked"][0]["precheckStatus"], "needs_title_clean")
+        self.assertEqual(image_collection["blocked"][0]["precheckStatus"], "needs_image_check")
+
+    def test_precheck_low_priority_and_filters_statuses(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710004.html")
+        app.DB.update_candidate(candidate["id"], {
+            "title": "冬季加绒雪地靴保暖厚棉鞋",
+            "category": "雪地靴",
+            "source_price": 320,
+            "weight_g": 4200,
+        })
+
+        result = app.precheck_candidates([candidate["id"]], month=6)
+        low_priority = app.filter_candidates_by_status(app.DB.list_candidates(), "low_priority_skipped")
+        collection = app.collect_qualified_candidates([candidate["id"]])
+
+        self.assertEqual(result["items"][0]["precheckStatus"], "low_priority_skipped")
+        self.assertEqual(result["items"][0]["seaFitStatus"], "sea_fit_poor")
+        self.assertEqual(result["items"][0]["seasonFitStatus"], "season_fit_poor")
+        self.assertEqual([item["id"] for item in low_priority], [candidate["id"]])
+        self.assertEqual(collection["items"], [])
+
+    def test_precheck_passed_candidate_can_enter_collection_queue(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710005.html")
+
+        result = app.precheck_candidates([candidate["id"]])
+        summary = app.candidate_summary(app.DB.get_candidate(candidate["id"]))
+        passed = app.filter_candidates_by_status(app.DB.list_candidates(), "precheck_passed")
+        queue = app.collection_queue_summary("pending")
+
+        self.assertEqual(result["items"][0]["precheckStatus"], "precheck_passed")
+        self.assertTrue(summary["canCollect"])
+        self.assertEqual([item["id"] for item in passed], [candidate["id"]])
+        self.assertTrue(any(item["candidateId"] == candidate["id"] for item in queue["items"]))
+
+    def test_precheck_failed_candidate_is_explained_and_blocked(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/710006.html")
+        app.DB.update_candidate(candidate["id"], {"source_price": 0})
+
+        result = app.precheck_candidates([candidate["id"]])
+        collection = app.collect_qualified_candidates([candidate["id"]])
+
+        self.assertEqual(result["items"][0]["precheckStatus"], "precheck_failed")
+        self.assertIn("source_price", result["items"][0]["precheckDetails"]["missingBasicFields"])
+        self.assertEqual(collection["items"], [])
+        self.assertEqual(collection["blocked"][0]["precheckStatus"], "precheck_failed")
+
     def test_candidate_summary_reports_market_collection_pool_status(self):
         candidate = app.DB.import_candidates(["https://detail.1688.com/offer/777.html"])[0]
         app.DB.update_candidate(candidate["id"], {
@@ -292,8 +381,14 @@ class WorkflowTest(unittest.TestCase):
             "supplier_years": 5,
             "dispatch_hours": 48,
             "image_count": 4,
+            "images": [
+                "https://example.com/light-a.jpg",
+                "https://example.com/light-b.jpg",
+                "https://example.com/light-c.jpg",
+            ],
             "sku_complete": True,
         })
+        app.precheck_candidates([candidate["id"]])
         evaluations = app.evaluate_candidate(app.DB.get_candidate(candidate["id"]), {
             "markets": {
                 "MY": {"targetPriceCny": 150, "trend": 85, "salesSignal": 82, "competition": 25, "dataComplete": True},

@@ -93,6 +93,47 @@ DEDUPE_SKIP_STATUSES = {
     "needs_manual_duplicate_check",
 }
 
+PRECHECK_STATUS_LABELS = {
+    "not_checked": "未预检",
+    "precheck_passed": "预检通过",
+    "needs_title_clean": "需清洗标题",
+    "needs_image_check": "需图片检查",
+    "low_priority_skipped": "低优先级跳过",
+    "risk_blocked": "风险阻断",
+    "precheck_failed": "预检失败",
+}
+
+PRECHECK_BLOCK_STATUSES = {
+    "not_checked",
+    "needs_title_clean",
+    "needs_image_check",
+    "low_priority_skipped",
+    "risk_blocked",
+    "precheck_failed",
+}
+
+RISK_KEYWORD_GROUPS = [
+    ("品牌侵权/大牌仿品", ("原单", "高仿", "复刻", "大牌", "莆田", "尾货", "仿品", "假货", "nike", "adidas", "lv", "gucci", "chanel", "dior", "prada", "balenciaga")),
+    ("医疗或药品功效", ("医疗", "治疗", "治愈", "医用", "药品", "械字号", "降压", "降糖", "根治", "止痛", "抗菌消炎")),
+    ("减肥或夸大功效", ("减肥", "瘦身", "丰胸", "永久", "100%", "百分百", "奇效", "神器", "立刻见效", "虚假宣传", "夸大功效")),
+    ("成人敏感品", ("成人", "情趣", "避孕", "私处", "催情")),
+    ("武器刀具", ("刀具", "匕首", "砍刀", "武器", "电击", "弓弩", "弹弓", "防身器")),
+    ("违禁或需资质", ("违禁", "违禁药", "保健品", "食品", "化妆品", "三无", "处方", "电子烟")),
+]
+
+TITLE_CLEAN_NOISE = (
+    "厂家直销", "源头工厂", "一件代发", "跨境", "外贸", "批发", "包邮", "爆款",
+    "新款", "网红", "抖音", "淘宝", "天猫", "1688", "现货", "支持代发",
+)
+
+SUMMER_TOKENS = ("透气", "凉鞋", "防滑", "轻便", "户外", "速干", "网面", "清凉", "沙滩")
+RAINY_TOKENS = ("防滑", "防水", "防潮", "雨", "速干", "涉水")
+FESTIVAL_TOKENS = ("礼品", "装饰", "配饰", "节日", "圣诞", "新年", "派对")
+OFF_SEASON_WARM_TOKENS = ("加绒", "羽绒", "保暖", "雪地", "棉靴", "暖手", "厚棉", "毛绒")
+SEA_GOOD_TOKENS = ("透气", "凉鞋", "防滑", "防水", "轻便", "户外", "收纳", "配饰", "运动", "包", "鞋", "家居")
+CONTENT_FRIENDLY_TOKENS = ("新奇", "懒人", "收纳", "装饰", "配饰", "鞋", "包", "运动", "户外", "防滑", "变形", "多功能")
+BULKY_OR_FRAGILE_TOKENS = ("家具", "大件", "桌", "椅", "床", "玻璃", "陶瓷", "瓷器", "大型", "重型")
+
 REJECTION_REASONS = ["鞋子变形", "颜色不一致", "文字错误", "Logo 错误", "背景杂乱", "主体不清晰", "风格不符合平台", "其他"]
 
 WORKFLOW_STAGE_LABELS = {
@@ -118,6 +159,7 @@ WORKFLOW_STAGE_LABELS = {
 def initialize():
     ensure_local_runtime(DATA_DIR)
     SOURCING.dedupe_callback = lambda candidate_ids: dedupe_candidates(candidate_ids)
+    SOURCING.precheck_callback = lambda candidate_ids: precheck_candidates(candidate_ids)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
     apply_config_to_settings()
     DB.migrate_products_json(DATA_DIR / "products.json")
@@ -257,6 +299,307 @@ def candidate_is_duplicate_skipped(candidate):
     return candidate_dedupe_status(candidate) in DEDUPE_SKIP_STATUSES
 
 
+def candidate_precheck_status(candidate):
+    return str((candidate or {}).get("precheck_status") or "")
+
+
+def candidate_precheck_text(candidate):
+    return " ".join(
+        str((candidate or {}).get(field) or "")
+        for field in ("title", "category", "supplier_name", "sales_text", "origin_place")
+    ).strip()
+
+
+def candidate_precheck_signature(candidate):
+    candidate = candidate or {}
+    images = candidate.get("images") or []
+    values = [
+        candidate.get("title") or "",
+        candidate.get("category") or "",
+        candidate.get("supplier_name") or "",
+        candidate.get("sales_text") or "",
+        candidate.get("origin_place") or "",
+        str(candidate.get("source_price") or 0),
+        str(candidate.get("weight_g") or 0),
+        str(candidate.get("image_count") or 0),
+        str(bool(candidate.get("sku_complete"))),
+        "|".join(str(item or "") for item in images[:5]),
+    ]
+    return clean_title_for_dedupe("||".join(values))
+
+
+def candidate_precheck_effective(candidate):
+    candidate = candidate or {}
+    stored_status = candidate_precheck_status(candidate)
+    checked_at = int(candidate.get("precheck_checked_at") or 0)
+    updated_at = int(candidate.get("updated_at") or 0)
+    details = candidate.get("precheck_details") or {}
+    current_signature = candidate_precheck_signature(candidate)
+    if (
+        stored_status
+        and checked_at
+        and checked_at >= updated_at
+        and details.get("sourceSignature") == current_signature
+    ):
+        return {
+            "precheck_status": stored_status or "not_checked",
+            "precheck_reason": str(candidate.get("precheck_reason") or ""),
+            "precheck_reasons": candidate.get("precheck_reasons") or [],
+            "precheck_details": details,
+            "sea_fit_status": str(candidate.get("sea_fit_status") or ""),
+            "season_fit_status": str(candidate.get("season_fit_status") or ""),
+            "precheck_checked_at": checked_at,
+            "persisted": True,
+        }
+    analysis = analyze_candidate_precheck(candidate)
+    analysis["persisted"] = False
+    return analysis
+
+
+def text_has_any(text, tokens):
+    haystack = str(text or "").lower()
+    return any(str(token or "").lower() in haystack for token in tokens if str(token or "").strip())
+
+
+def candidate_risk_hits(candidate):
+    text = candidate_precheck_text(candidate).lower()
+    hits = []
+    for label, tokens in RISK_KEYWORD_GROUPS:
+        matched = [token for token in tokens if str(token or "").lower() in text]
+        if matched:
+            hits.append({"label": label, "tokens": matched})
+    return hits
+
+
+def candidate_title_quality(candidate):
+    title = str((candidate or {}).get("title") or "").strip()
+    cleaned = clean_title_for_dedupe(title)
+    if not title:
+        return False, "标题缺失"
+    if len(cleaned) < 4:
+        return False, "标题过短或不可识别"
+    if not re.search(r"[\u4e00-\u9fffA-Za-z]", cleaned):
+        return False, "标题缺少有效商品词"
+    return True, ""
+
+
+def candidate_title_needs_clean(candidate):
+    title = str((candidate or {}).get("title") or "").strip()
+    return text_has_any(title, TITLE_CLEAN_NOISE)
+
+
+def current_season_fit_status(candidate, month=None):
+    month = int(month or time.localtime().tm_mon or 0)
+    text = candidate_precheck_text(candidate)
+    reasons = []
+    good = False
+    poor = False
+    warm_months = {4, 5, 6, 7, 8, 9, 10}
+    rainy_months = {5, 6, 7, 8, 9, 10}
+    festival_months = {1, 2, 11, 12}
+    if month in warm_months and text_has_any(text, SUMMER_TOKENS):
+        reasons.append("适合当前热季或夏季")
+        good = True
+    if month in rainy_months and text_has_any(text, RAINY_TOKENS):
+        reasons.append("适合雨季")
+        good = True
+    if month in festival_months and text_has_any(text, FESTIVAL_TOKENS):
+        reasons.append("适合节日季")
+        good = True
+    if text_has_any(text, OFF_SEASON_WARM_TOKENS) and month in warm_months | rainy_months | festival_months:
+        reasons.append("明显偏冬季/保暖商品")
+        poor = True
+    if text_has_any(text, ("羽绒", "加厚", "保暖", "雪地")) and month in warm_months | rainy_months:
+        poor = True
+    if good and not poor:
+        return "season_fit_good", reasons or ["适合当前季节"], []
+    if poor and not good:
+        return "season_fit_poor", reasons or ["不符合当前季节"], []
+    return "season_fit_normal", reasons or ["季节适配一般"], []
+
+
+def sea_fit_status(candidate):
+    text = candidate_precheck_text(candidate)
+    price = float((candidate or {}).get("source_price") or 0)
+    weight = float((candidate or {}).get("weight_g") or 0)
+    reasons = []
+    score = 0
+    if text_has_any(text, SEA_GOOD_TOKENS):
+        score += 2
+        reasons.append("适合东南亚气候和内容展示")
+    if text_has_any(text, CONTENT_FRIENDLY_TOKENS):
+        score += 1
+        reasons.append("适合 TikTok 冲动消费展示")
+    if 0 < price <= 120:
+        score += 2
+        reasons.append("价格带适合东南亚市场")
+    elif 120 < price <= 220:
+        score += 1
+        reasons.append("价格带中等")
+    elif price > 220:
+        score -= 2
+        reasons.append("价格偏高")
+    if 0 < weight <= 1000:
+        score += 2
+        reasons.append("重量较轻，物流更友好")
+    elif 1000 < weight <= 2500:
+        score += 1
+        reasons.append("重量可接受")
+    elif weight > 2500:
+        score -= 2
+        reasons.append("重量偏重")
+    if text_has_any(text, BULKY_OR_FRAGILE_TOKENS):
+        score -= 2
+        reasons.append("体积大或易碎，不利于跨境物流")
+    if text_has_any(text, OFF_SEASON_WARM_TOKENS):
+        score -= 1
+        reasons.append("偏厚重/保暖，不利于 SEA 日常消费")
+    if score >= 5:
+        return "sea_fit_good", reasons or ["适合东南亚市场"], score
+    if score >= 1:
+        return "sea_fit_normal", reasons or ["东南亚适配一般"], score
+    return "sea_fit_poor", reasons or ["东南亚适配较弱"], score
+
+
+def analyze_candidate_precheck(candidate, month=None):
+    candidate = candidate or {}
+    reasons = []
+    risk_hits = candidate_risk_hits(candidate)
+    title_ok, title_reason = candidate_title_quality(candidate)
+    title_needs_clean = candidate_title_needs_clean(candidate)
+    images = candidate.get("images") or []
+    image_count = int(candidate.get("image_count") or len([item for item in images if item]) or 0)
+    sku_complete = bool(candidate.get("sku_complete"))
+    source_price = float(candidate.get("source_price") or 0)
+    weight_g = float(candidate.get("weight_g") or 0)
+    category = str(candidate.get("category") or "").strip() or infer_candidate_category(candidate.get("title"), "")
+    season_status, season_reasons, season_score = current_season_fit_status(candidate, month=month)
+    sea_status, sea_reasons, sea_score = sea_fit_status(candidate)
+    title_needed = not title_ok or title_needs_clean
+    image_needed = image_count < 3
+    basic_missing = []
+    if not sku_complete:
+        basic_missing.append("sku_complete")
+    if source_price <= 0:
+        basic_missing.append("source_price")
+    if weight_g <= 0:
+        basic_missing.append("weight_g")
+    if not category:
+        basic_missing.append("category")
+    if risk_hits:
+        reasons.extend(["%s：%s" % (item["label"], "、".join(item["tokens"])) for item in risk_hits])
+    if title_needed:
+        reasons.append(title_reason or "标题含1688营销词，需要清洗")
+    if image_needed:
+        reasons.append("图片数量不足，需要补图")
+    if basic_missing:
+        reasons.append("基础字段缺失：" + "、".join(basic_missing))
+    if season_status == "season_fit_poor":
+        reasons.extend(season_reasons)
+    if sea_status == "sea_fit_poor":
+        reasons.extend(sea_reasons)
+    status = "precheck_passed"
+    if risk_hits:
+        status = "risk_blocked"
+    elif title_needed:
+        status = "needs_title_clean"
+    elif image_needed:
+        status = "needs_image_check"
+    elif basic_missing:
+        status = "precheck_failed"
+    elif season_status == "season_fit_poor" or sea_status == "sea_fit_poor":
+        status = "low_priority_skipped"
+    if status == "precheck_passed":
+        reason_text = "；".join(reasons) if reasons else "通过预检"
+    elif status == "risk_blocked":
+        reason_text = "；".join(reasons) or "高风险商品"
+    elif status == "needs_title_clean":
+        reason_text = title_reason or "标题需要清洗"
+    elif status == "needs_image_check":
+        reason_text = "图片数量不足"
+    elif status == "low_priority_skipped":
+        reason_text = "；".join(season_reasons + sea_reasons) or "低优先级跳过"
+    else:
+        reason_text = "；".join(reasons) or "基础字段不完整"
+    details = {
+        "titleCleanable": title_ok,
+        "titleNeedsClean": title_needed,
+        "titleReason": title_reason or ("标题含1688营销词，需要清洗" if title_needs_clean else ""),
+        "imageCount": image_count,
+        "imageThreshold": 3,
+        "skuComplete": sku_complete,
+        "sourcePrice": source_price,
+        "weightG": weight_g,
+        "category": category,
+        "missingBasicFields": basic_missing,
+        "riskHits": risk_hits,
+        "riskCount": len(risk_hits),
+        "seasonFitStatus": season_status,
+        "seasonReasons": season_reasons,
+        "seasonScore": season_score,
+        "seaFitStatus": sea_status,
+        "seaReasons": sea_reasons,
+        "seaScore": sea_score,
+        "currentMonth": int(month or time.localtime().tm_mon or 0),
+        "sourceSignature": candidate_precheck_signature(candidate),
+        "suggestedAction": {
+            "risk_blocked": "直接跳过",
+            "needs_title_clean": "先清洗标题再继续",
+            "needs_image_check": "补足商品图片后再继续",
+            "precheck_failed": "补齐价格、重量、类目或 SKU",
+            "low_priority_skipped": "降级处理或暂缓采集",
+            "precheck_passed": "可以继续进入后续流程",
+        }.get(status, "继续检查"),
+    }
+    return {
+        "precheck_status": status,
+        "precheck_reason": reason_text,
+        "precheck_reasons": reasons or ([reason_text] if reason_text else []),
+        "precheck_details": details,
+        "sea_fit_status": sea_status,
+        "season_fit_status": season_status,
+        "precheck_checked_at": int(time.time()),
+    }
+
+
+def precheck_candidates(candidate_ids=None, month=None):
+    ids = candidate_ids or [item["id"] for item in DB.list_candidates()]
+    items = []
+    counts = {
+        "precheck_passed": 0,
+        "needs_title_clean": 0,
+        "needs_image_check": 0,
+        "low_priority_skipped": 0,
+        "risk_blocked": 0,
+        "precheck_failed": 0,
+    }
+    missing = []
+    for candidate_id in ids:
+        candidate = DB.get_candidate(candidate_id)
+        if not candidate:
+            missing.append({"id": candidate_id, "error": "候选商品不存在"})
+            continue
+        analysis = analyze_candidate_precheck(candidate, month=month)
+        updated = DB.update_candidate(candidate_id, analysis)
+        summary = candidate_summary(updated)
+        items.append(summary)
+        status = summary.get("precheckStatus") or "precheck_failed"
+        if status in counts:
+            counts[status] += 1
+    return {
+        "items": items,
+        "missing": missing,
+        "counts": counts,
+        "checked": len(items),
+        "summary": {
+            "passed": counts["precheck_passed"],
+            "riskBlocked": counts["risk_blocked"],
+            "lowPrioritySkipped": counts["low_priority_skipped"],
+            "failed": counts["precheck_failed"] + counts["needs_title_clean"] + counts["needs_image_check"],
+        },
+    }
+
+
 def encode_1688_keyword(keyword):
     try:
         return quote(keyword.encode("gbk"))
@@ -297,16 +640,30 @@ def products_to_csv(products):
 
 
 def candidate_summary(candidate):
+    if not candidate:
+        return {}
     evaluations = candidate.get("evaluations") or []
     threshold = float(DB.setting("evaluation.threshold", 70))
     confidence = float(DB.setting("evaluation.min_confidence", 70))
     dedupe_status = candidate_dedupe_status(candidate)
     dedupe_reasons = candidate.get("dedupe_reasons") or []
+    precheck = candidate_precheck_effective(candidate)
+    precheck_status = precheck.get("precheck_status") or "not_checked"
     candidate["dedupeStatus"] = dedupe_status
     candidate["dedupeStatusLabel"] = DEDUPE_STATUS_LABELS.get(dedupe_status, dedupe_status)
     candidate["dedupeReason"] = candidate.get("dedupe_reason") or ""
     candidate["dedupeReasons"] = dedupe_reasons
     candidate["duplicateSkipped"] = candidate_is_duplicate_skipped(candidate)
+    candidate["precheckStatus"] = precheck_status
+    candidate["precheckStatusLabel"] = PRECHECK_STATUS_LABELS.get(precheck_status, precheck_status)
+    candidate["precheckReason"] = precheck.get("precheck_reason") or ""
+    candidate["precheckReasons"] = precheck.get("precheck_reasons") or []
+    candidate["precheckDetails"] = precheck.get("precheck_details") or {}
+    candidate["precheckCheckedAt"] = precheck.get("precheck_checked_at")
+    candidate["precheckPersisted"] = bool(precheck.get("persisted"))
+    candidate["seaFitStatus"] = precheck.get("sea_fit_status") or ""
+    candidate["seasonFitStatus"] = precheck.get("season_fit_status") or ""
+    candidate["precheckBlocked"] = precheck_status in PRECHECK_BLOCK_STATUSES and precheck_status != "not_checked"
     candidate["marketSummary"] = candidate_market_summary(candidate)
     candidate["qualifiedMarkets"] = [
         item["market"] for item in evaluations
@@ -319,7 +676,13 @@ def candidate_summary(candidate):
     candidate["missingFieldCount"] = len(candidate["missingFields"])
     candidate["nextAction"] = candidate["dataCompleteness"]["nextAction"]
     candidate["isReadyToScore"] = candidate["dataCompleteness"]["readyToScore"]
-    candidate["canCollect"] = bool(candidate["qualifiedMarkets"]) and candidate["isReadyToScore"] and not candidate_is_skipped(candidate) and not candidate["duplicateSkipped"]
+    candidate["canCollect"] = (
+        bool(candidate["qualifiedMarkets"])
+        and candidate["isReadyToScore"]
+        and not candidate_is_skipped(candidate)
+        and not candidate["duplicateSkipped"]
+        and precheck_status == "precheck_passed"
+    )
     candidate["queue"] = candidate_queue(candidate)
     candidate["workflowStatus"] = get_candidate_workflow_status(candidate)
     return candidate
@@ -343,6 +706,24 @@ def get_candidate_workflow_status(candidate):
         return workflow_status("failure_handling", blocked=True, failed=True, next_action="查看重复原因", detail=candidate.get("dedupe_reason") or "重复候选已跳过")
     if candidate_is_skipped(candidate):
         return workflow_status("failure_handling", blocked=True, failed=True, next_action="恢复或删除候选", detail="候选已跳过")
+    precheck = candidate_precheck_effective(candidate)
+    precheck_status = precheck.get("precheck_status") or "not_checked"
+    if precheck_status in ("risk_blocked", "precheck_failed", "low_priority_skipped"):
+        failed = precheck_status in ("risk_blocked", "precheck_failed")
+        return workflow_status(
+            "failure_handling",
+            blocked=True,
+            failed=failed,
+            next_action=PRECHECK_STATUS_LABELS.get(precheck_status, "处理预检"),
+            detail=precheck.get("precheck_reason") or "候选预检未通过",
+        )
+    if precheck_status in ("needs_title_clean", "needs_image_check"):
+        return workflow_status(
+            "candidate_need_data",
+            blocked=True,
+            next_action=PRECHECK_STATUS_LABELS.get(precheck_status, "处理预检"),
+            detail=precheck.get("precheck_reason") or "候选预检待补",
+        )
     completeness = candidate.get("dataCompleteness") or candidate_data_completeness(candidate)
     if not completeness.get("readyToScore"):
         return workflow_status("candidate_need_data", blocked=True, next_action=completeness.get("nextAction") or "补数据", detail="缺失 %d 项必填数据" % len(completeness.get("requiredMissingFields") or []))
@@ -544,6 +925,8 @@ def filter_candidates_by_status(candidates, status):
         return [item for item in summaries if item["dedupeStatus"] == "new_candidate"]
     if status == "duplicate_skipped":
         return [item for item in summaries if item["queue"] == "duplicate_skipped"]
+    if status in ("precheck_passed", "risk_blocked", "low_priority_skipped"):
+        return [item for item in summaries if item["precheckStatus"] == status]
     return summaries
 
 
@@ -560,6 +943,7 @@ def run_ids_from_payload(payload):
 def bulk_check_candidates(candidate_ids):
     ids = candidate_ids or [item["id"] for item in DB.list_candidates()]
     dedupe_candidates(ids)
+    precheck_candidates(ids)
     checked, need_data, ready_to_score, missing = [], [], [], []
     for candidate_id in ids:
         item = DB.get_candidate(candidate_id)
@@ -840,15 +1224,40 @@ def collect_qualified_candidates(candidate_ids, markets=None, review=False):
                 "error": "重复候选已跳过，不进入自动采集",
             })
             continue
+        precheck_result = precheck_candidates([candidate["id"]])
+        prechecked = (precheck_result.get("items") or [{}])[0]
+        precheck_status = prechecked.get("precheckStatus") or "not_checked"
+        precheck_reason = prechecked.get("precheckReason") or ""
+        if precheck_status != "precheck_passed":
+            incomplete_basic = not summary["isReadyToScore"]
+            blocked.append({
+                "id": candidate["id"],
+                "title": prechecked.get("title") or summary.get("title") or summary.get("source_product_id") or candidate["id"],
+                "precheckStatus": precheck_status,
+                "precheckStatusLabel": prechecked.get("precheckStatusLabel") or PRECHECK_STATUS_LABELS.get(precheck_status, precheck_status),
+                "precheckReason": precheck_reason,
+                "precheckReasons": prechecked.get("precheckReasons") or [],
+                "precheckDetails": prechecked.get("precheckDetails") or {},
+                "missingFields": summary.get("dataCompleteness", {}).get("requiredMissingFields") or [],
+                "missingHints": summary.get("dataCompleteness", {}).get("requiredMissingHints") or [],
+                "error": "基础数据不完整，不能进入自动采集" if incomplete_basic else (precheck_reason or "商品预检未通过，不进入自动采集"),
+            })
+            continue
         if not summary["isReadyToScore"]:
             blocked.append({
                 "id": candidate["id"],
                 "title": summary.get("title") or summary.get("source_product_id") or candidate["id"],
                 "missingFields": summary.get("dataCompleteness", {}).get("requiredMissingFields") or [],
                 "missingHints": summary.get("dataCompleteness", {}).get("requiredMissingHints") or [],
+                "precheckStatus": precheck_status,
+                "precheckStatusLabel": prechecked.get("precheckStatusLabel") or PRECHECK_STATUS_LABELS.get(precheck_status, precheck_status),
+                "precheckReason": precheck_reason,
+                "precheckReasons": prechecked.get("precheckReasons") or [],
                 "error": "基础数据不完整，不能进入自动采集",
             })
             continue
+        candidate = DB.get_candidate(candidate["id"])
+        summary = candidate_summary(candidate)
         collectable_markets = [
             item["market"] for item in candidate["evaluations"]
             if item["total_score"] >= threshold and item["confidence"] >= confidence and not item["hard_blocks"]
@@ -888,7 +1297,7 @@ def qualified_evaluations_summary():
     for candidate in DB.list_candidates():
         summary = candidate_summary(candidate)
         collectable = summary["marketSummary"].get("collectableMarkets") or []
-        if not collectable:
+        if not collectable or summary.get("precheckStatus") != "precheck_passed":
             continue
         items.append({
             "id": summary["id"],
@@ -900,7 +1309,9 @@ def qualified_evaluations_summary():
             "rejectedMarkets": summary["marketSummary"].get("rejectedMarkets") or [],
             "markets": summary["marketSummary"].get("markets") or {},
             "canCollect": summary["canCollect"],
-            "reason": "、".join(collectable) + " 达到采集门槛",
+            "precheckStatus": summary.get("precheckStatus"),
+            "precheckReason": summary.get("precheckReason"),
+            "reason": "、".join(collectable) + " 达到采集门槛，预检通过",
         })
     return {"items": items, "count": len(items)}
 
@@ -1633,7 +2044,9 @@ def refresh_candidates_from_sources(candidate_ids):
             errors.append({"id": candidate_id, "error": "候选商品不存在"})
             continue
         try:
-            items.append(refresh_candidate_from_source(candidate_id))
+            refreshed = refresh_candidate_from_source(candidate_id)
+            if refreshed:
+                items.append(candidate_summary(DB.get_candidate(candidate_id)))
         except Exception as exc:
             errors.append({
                 "id": candidate_id,
@@ -2916,12 +3329,28 @@ class AppHandler(BaseHTTPRequestHandler):
             candidates = DB.list_candidates()
             if status in ("new_candidate", "duplicate_skipped"):
                 dedupe_candidates([item["id"] for item in candidates])
+            if status in ("precheck_passed", "risk_blocked", "low_priority_skipped"):
+                precheck_candidates([item["id"] for item in candidates])
+                candidates = DB.list_candidates()
             items = filter_candidates_by_status(candidates, status)
             if not status:
                 items = [candidate_summary(item) for item in items]
             return self.send_json({"items": items})
         if path == "/api/candidates/dedupe":
-            return self.send_json(dedupe_candidates(candidate_ids_from_payload(payload)))
+            query = parse_qs(parsed.query)
+            status = (query.get("status") or [""])[0]
+            return self.send_json(dedupe_queue_summary(status))
+        if path == "/api/candidates/precheck":
+            query = parse_qs(parsed.query)
+            status = (query.get("status") or [""])[0]
+            all_items = [candidate_summary(item) for item in DB.list_candidates()]
+            items = all_items
+            if status:
+                items = filter_candidates_by_status(DB.list_candidates(), status)
+            counts = {key: 0 for key in PRECHECK_STATUS_LABELS}
+            for item in all_items:
+                counts[item.get("precheckStatus") or "not_checked"] = counts.get(item.get("precheckStatus") or "not_checked", 0) + 1
+            return self.send_json({"items": items, "counts": counts, "count": len(items)})
         if path == "/api/evaluations/qualified":
             return self.send_json(qualified_evaluations_summary())
         if path == "/api/collections/queue":
@@ -3074,6 +3503,9 @@ class AppHandler(BaseHTTPRequestHandler):
             items = DB.import_candidates(urls)
             for item in items:
                 DB.update_candidate(item["id"], {"source_product_id": source_product_id(item["source_url"])})
+            ids = [item["id"] for item in items]
+            dedupe_candidates(ids)
+            precheck_candidates(ids)
             return self.send_json({"items": [candidate_summary(DB.get_candidate(item["id"])) for item in items]}, HTTPStatus.CREATED)
 
         if path == "/api/candidates/search":
@@ -3122,8 +3554,15 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/candidates/refresh-sources":
             return self.send_json(refresh_candidates_from_sources(payload.get("candidateIds") or []))
 
+        if path == "/api/candidates/dedupe":
+            return self.send_json(dedupe_candidates(candidate_ids_from_payload(payload)))
+
         if path == "/api/candidates/bulk-check":
             return self.send_json(bulk_check_candidates(candidate_ids_from_payload(payload)))
+
+        if path == "/api/candidates/precheck":
+            ids = candidate_ids_from_payload(payload)
+            return self.send_json(precheck_candidates(ids))
 
         if path == "/api/candidates/bulk-skip":
             ids = candidate_ids_from_payload(payload)
