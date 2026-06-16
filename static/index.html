@@ -41,6 +41,23 @@
       <article class="danger"><span>禁止发布</span><strong id="local-publish-forbidden">true</strong></article>
     </section>
 
+    <section class="panel environment-status-panel" aria-labelledby="environment-title">
+      <div class="environment-heading">
+        <div>
+          <p class="eyebrow">REAL BROWSER ENVIRONMENT</p>
+          <h2 id="environment-title">环境状态</h2>
+        </div>
+        <div class="toolbar-actions environment-actions">
+          <button id="browser-start" class="button dark" type="button">启动浏览器</button>
+          <button id="browser-check" class="button outline" type="button">检测环境</button>
+          <button id="browser-recheck" class="button accent" type="button">我已完成登录，重新检测</button>
+        </div>
+      </div>
+      <div id="environment-status-grid" class="environment-status-grid"></div>
+      <div id="environment-detail" class="environment-detail"></div>
+      <p id="environment-alert" class="environment-alert hidden"></p>
+    </section>
+
     <section class="workflow-overview" aria-labelledby="workflow-title">
       <div class="workflow-heading">
         <div>

@@ -1,4 +1,4 @@
-const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, batchPreview: null, workflow: [], settings: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null, localStatus: {}, workbenchToken: "" };
+const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, batchPreview: null, workflow: [], settings: {}, browserStatus: {}, platformStatus: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null, localStatus: {}, workbenchToken: "" };
 const markets = { MY: "马来西亚", PH: "菲律宾", SG: "新加坡", TH: "泰国", VN: "越南" };
 const workflowTargets = {
   import_candidates: "candidates",
@@ -151,11 +151,13 @@ function renderLocalStatus(status = {}) {
 }
 
 async function loadAll() {
-  const [localStatus, dashboard, workflow, candidates, products, shops, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue, settings, selfcheck] = await Promise.all([
-    api("/api/local/status"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/shops"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`), api("/api/settings"), api("/api/selfcheck"),
+  const [localStatus, browserStatus, platformStatus, dashboard, workflow, candidates, products, shops, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue, settings, selfcheck] = await Promise.all([
+    api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/shops"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`), api("/api/settings"), api("/api/selfcheck"),
   ]);
   state.localStatus = localStatus;
   state.workbenchToken = localStatus.token || "";
+  state.browserStatus = browserStatus;
+  state.platformStatus = platformStatus;
   state.workflow = workflow.steps || [];
   state.candidates = candidates.items;
   state.products = products.items;
@@ -184,6 +186,7 @@ async function loadAll() {
   renderPublishResults();
   renderRuns();
   populateSettings();
+  renderEnvironmentStatus(browserStatus, platformStatus, localStatus);
   renderPreflight(dashboard.preflight);
   renderSelfcheck(selfcheck);
 }
@@ -876,6 +879,48 @@ function renderPreflight(data) {
   $("#preflight-list").innerHTML = checks.map(([label, ok]) => `<div><span>${esc(label)}</span><strong class="${ok ? "check-ok" : "check-warn"}">${ok ? "已通过" : "待处理"}</strong></div>`).join("");
 }
 
+function envBadge(ok, trueLabel = "正常", falseLabel = "待处理") {
+  return `<strong class="${ok ? "check-ok" : "check-warn"}">${ok ? trueLabel : falseLabel}</strong>`;
+}
+
+async function refreshEnvironmentStatus(message = "") {
+  const [localStatus, browserStatus, platformStatus] = await Promise.all([
+    api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"),
+  ]);
+  state.localStatus = localStatus;
+  state.workbenchToken = localStatus.token || state.workbenchToken;
+  state.browserStatus = browserStatus;
+  state.platformStatus = platformStatus;
+  renderLocalStatus(localStatus);
+  renderEnvironmentStatus(browserStatus, platformStatus, localStatus);
+  if (message) notify(message, platformStatus.waiting_for_manual ? "error" : "success");
+  return { localStatus, browserStatus, platformStatus };
+}
+
+function renderEnvironmentStatus(browser = state.browserStatus, platform = state.platformStatus, local = state.localStatus) {
+  const grid = $("#environment-status-grid");
+  if (!grid) return;
+  const manual = platform.waiting_for_manual || platform.requires_manual;
+  grid.innerHTML = `
+    <article><span>Chrome</span>${envBadge(browser.chrome_ready, "可用", "未就绪")}</article>
+    <article><span>CDP</span>${envBadge(browser.cdp_ready, "已连接", "未连接")}</article>
+    <article><span>1688 登录</span>${envBadge(platform.alibaba_logged_in, "已登录", "待登录")}</article>
+    <article><span>妙手登录</span>${envBadge(platform.miaoshou_logged_in, "已登录", "待登录")}</article>
+    <article><span>人工验证</span>${envBadge(!manual, "无需处理", "等待人工")}</article>
+    <article><span>no_publish</span>${envBadge(local.noPublish, "true", "false")}</article>
+  `;
+  $("#environment-detail").innerHTML = `
+    <span>Profile：${esc(browser.profile_dir || "-")}</span>
+    <span>端口：${Number(browser.debug_port || 0)}</span>
+    <span>当前URL：${browser.current_url ? `<a href="${esc(browser.current_url)}" target="_blank" rel="noreferrer">${esc(browser.current_url)}</a>` : "-"}</span>
+  `;
+  const alert = $("#environment-alert");
+  alert.classList.toggle("hidden", !manual);
+  alert.textContent = platform.manual_message || "请在专用 Chrome 中手动完成登录或验证后重新检测。";
+  const start = $("#browser-start");
+  if (start) start.disabled = Boolean(browser.cdp_ready);
+}
+
 function renderSelfcheck(data) {
   const nextSteps = data.nextSteps || {};
   const manual = (nextSteps.manual || []).map((item) => `<div title="${esc(item.detail)}"><span>${esc(item.label)}</span><small>${esc(item.guidance)}</small><strong class="${item.status === "pass" ? "check-ok" : item.status === "fail" ? "run-error" : "check-warn"}">${item.status === "pass" ? "通过" : item.status === "fail" ? "失败" : "待配置"}</strong></div>`).join("");
@@ -892,14 +937,16 @@ async function refreshRuns() {
 async function pollRuntime() {
   if (document.hidden) return;
   try {
-    const [localStatus, dashboard, workflow, candidates, products, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue] = await Promise.all([
-      api("/api/local/status"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`),
+    const [localStatus, browserStatus, platformStatus, dashboard, workflow, candidates, products, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue] = await Promise.all([
+      api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`),
     ]);
     const selected = new Set(selectedCandidates());
     const selectedProducts = new Set($$("#batch-products input:checked").map((input) => input.value));
     const selectedShops = new Set($$("#batch-shops input:checked").map((input) => input.value));
     state.localStatus = localStatus;
     state.workbenchToken = localStatus.token || state.workbenchToken;
+    state.browserStatus = browserStatus;
+    state.platformStatus = platformStatus;
     state.workflow = workflow.steps || [];
     state.candidates = candidates.items;
     state.products = products.items;
@@ -914,6 +961,7 @@ async function pollRuntime() {
     $("#metric-products").textContent = dashboard.products;
     $("#runtime-badge").innerHTML = `<i></i> ${localStatus.mode === "real" ? "真实模式" : "演练模式"}`;
     renderLocalStatus(localStatus);
+    renderEnvironmentStatus(browserStatus, platformStatus, localStatus);
     renderWorkflow();
     renderQualifiedPool();
     renderCollectionQueue();
@@ -1241,7 +1289,21 @@ for (const formId of ["image-settings", "automation-settings", "evaluation-setti
 }
 
 $("#check-automation").addEventListener("click", async () => { try { renderPreflight(await api("/api/automation/preflight")); } catch (error) { notify(error.message, "error"); } });
-$("#launch-chrome").addEventListener("click", async () => { try { renderPreflight(await api("/api/automation/launch", { method: "POST", body: "{}" })); notify("专用Chrome已启动，请完成妙手和1688登录"); } catch (error) { notify(error.message, "error"); } });
+$("#launch-chrome").addEventListener("click", async () => { try { await api("/api/browser/start", { method: "POST", body: "{}" }); await refreshEnvironmentStatus("专用Chrome已启动，请在浏览器中完成登录状态确认"); renderPreflight(await api("/api/automation/preflight")); } catch (error) { notify(error.message, "error"); } });
+$("#browser-start").addEventListener("click", async () => {
+  const button = $("#browser-start");
+  button.disabled = true;
+  try {
+    await api("/api/browser/start", { method: "POST", body: "{}" });
+    await refreshEnvironmentStatus("专用Chrome已启动");
+  } catch (error) {
+    notify(error.message, "error");
+  } finally {
+    button.disabled = Boolean(state.browserStatus?.cdp_ready);
+  }
+});
+$("#browser-check").addEventListener("click", async () => { try { await refreshEnvironmentStatus("环境检测完成"); } catch (error) { notify(error.message, "error"); } });
+$("#browser-recheck").addEventListener("click", async () => { try { await refreshEnvironmentStatus("已重新检测登录与验证状态"); } catch (error) { notify(error.message, "error"); } });
 $("#full-selfcheck").addEventListener("click", async () => {
   try {
     const result = await api("/api/selfcheck");

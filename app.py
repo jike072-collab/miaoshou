@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from lib.automation import AutomationEngine, source_product_id
+from lib.browser_manager import BrowserManager
 from lib.collector import CollectError, fetch_image, scrape_product
 from lib.database import Database, MARKETS
 from lib.evaluation import evaluate_candidate, evaluation_status
@@ -34,6 +35,7 @@ ensure_local_runtime(DATA_DIR)
 ASSET_DIR = DATA_DIR / "assets"
 DB = Database(DATA_DIR / "workbench.db")
 AUTOMATION = AutomationEngine(DB, DATA_DIR)
+BROWSER = BrowserManager(DB, DATA_DIR)
 WORKBENCH_TOKEN = load_or_create_token(DATA_DIR)
 RUN_LOCK = threading.Lock()
 ACTIVE_RUNS = set()
@@ -137,6 +139,26 @@ def reject_unsafe_publish_payload(payload):
     config = workbench_config()
     if config.get("no_publish", True) and not bool(payload.get("dryRun", True)):
         raise ValueError("no_publish=true：禁止创建真实发布批次，请保持演练模式")
+
+
+def block_run_for_manual(run, platform):
+    message = platform.get("manual_message") or "请在专用 Chrome 中完成登录或验证后继续"
+    diagnostics = {
+        "failedStep": "等待人工验证",
+        "error": message,
+        "currentUrl": platform.get("current_url") or "",
+        "screenshot": "",
+        "clickableText": [],
+        "suggestedActions": ["在专用 Chrome 中手动完成登录/验证码/短信验证", "完成后点击环境状态里的重新检测，再重试任务"],
+        "platformStatus": platform,
+    }
+    return DB.update_run(
+        run["id"],
+        status="waiting_for_manual",
+        current_step="等待人工处理",
+        error=message,
+        diagnostics=diagnostics,
+    )
 
 
 def json_body(handler):
@@ -648,7 +670,7 @@ def workflow_summary():
     live_pending = sum(1 for item in live_batches if item.get("status") in ("draft", "preparing", "confirmed"))
     live_failed = sum(1 for item in live_batches if item.get("status") in ("failed", "blocked"))
 
-    running_statuses = {"queued", "running", "preparing", "waiting_browser", "waiting_confirmation"}
+    running_statuses = {"queued", "running", "preparing", "waiting_browser", "waiting_for_manual", "waiting_confirmation"}
     run_pending = sum(1 for item in runs if item.get("status") in running_statuses)
     run_done = sum(1 for item in runs if item.get("status") == "completed")
     run_failed = len(publish_results_summary()["failures"])
@@ -887,7 +909,7 @@ def collection_queue_status(run):
     resolution = run.get("resolution") or ""
     if resolution == "manual" or status in ("manual", "awaiting_claim", "ready_for_live"):
         return "manual"
-    if status in ("queued", "preparing", "waiting_browser"):
+    if status in ("queued", "preparing", "waiting_browser", "waiting_for_manual"):
         return "pending"
     if status == "running":
         return "running"
@@ -902,6 +924,7 @@ def collection_queue_status(run):
 
 def collection_queue_item_from_run(run, candidates_by_id=None):
     candidates_by_id = candidates_by_id or {}
+    status = run.get("status") or ""
     candidate = candidates_by_id.get(run.get("candidate_id") or "") or DB.get_candidate(run.get("candidate_id") or "")
     diagnostics = run.get("diagnostics") or {}
     context = run.get("context") or {}
@@ -932,7 +955,7 @@ def collection_queue_item_from_run(run, candidates_by_id=None):
         "suggestedActions": diagnostics.get("suggestedActions") or (["检查妙手插件、登录状态和采集按钮文本后重试"] if queue == "failed" else []),
         "context": context,
         "resolution": run.get("resolution") or "",
-        "canRetry": queue in ("failed", "pending") and int(run.get("attempts") or 0) < 2,
+        "canRetry": (queue in ("failed", "pending") or status == "waiting_for_manual") and int(run.get("attempts") or 0) < 2,
         "canSkip": queue in ("pending", "failed", "manual"),
         "canManual": queue in ("pending", "running", "failed"),
     }
@@ -1529,6 +1552,11 @@ def execute_automation_run(run_id, confirm=False):
     confirm = confirm or phase == "confirm"
     try:
         DB.update_run(run_id, status="running", error="")
+        if run.get("kind") in ("collection", "publish", "keyword_search"):
+            platform = BROWSER.platform_status()
+            if platform.get("waiting_for_manual") and not AUTOMATION.is_dry_run(run):
+                block_run_for_manual(run, platform)
+                return
         result = AUTOMATION.confirm_publish(run_id) if confirm else AUTOMATION.run(run_id)
         if result and result.get("kind") == "collection" and result.get("status") == "completed":
             ensure_product_from_candidate(result.get("candidate_id"))
@@ -2067,7 +2095,7 @@ def publish_results_summary():
     publish_stats = publish_result_stats(publish_keys, shops)
     failed_statuses = {"failed", "blocked"}
     active_statuses = {"queued", "running", "preparing", "waiting_browser"}
-    waiting_statuses = {"waiting_confirmation", "awaiting_claim", "ready_for_live"}
+    waiting_statuses = {"waiting_confirmation", "awaiting_claim", "ready_for_live", "waiting_for_manual"}
     overview = {
         "totalRuns": len(runs),
         "completedRuns": sum(1 for item in runs if item.get("status") == "completed"),
@@ -2453,6 +2481,10 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.send_json(local_status())
         if path == "/api/config":
             return self.send_json(workbench_config())
+        if path == "/api/browser/status":
+            return self.send_json(BROWSER.status())
+        if path == "/api/platform/status":
+            return self.send_json(BROWSER.platform_status())
         if path == "/api/dashboard":
             candidates = DB.list_candidates()
             threshold = float(DB.setting("evaluation.threshold", 70))
@@ -2583,6 +2615,15 @@ class AppHandler(BaseHTTPRequestHandler):
     def route_post(self, path, payload):
         if path == "/api/config":
             return self.send_json(apply_config_to_settings(save_config(DATA_DIR, payload)))
+
+        if path == "/api/browser/start":
+            return self.send_json(BROWSER.start())
+
+        if path == "/api/browser/stop":
+            return self.send_json(BROWSER.stop())
+
+        if path == "/api/browser/restart":
+            return self.send_json(BROWSER.restart())
 
         if path == "/api/candidates/import-links":
             raw = payload.get("urls") or []
@@ -2844,7 +2885,7 @@ class AppHandler(BaseHTTPRequestHandler):
                 raise ValueError("任务不存在")
             if int(run["attempts"] or 0) >= 2:
                 raise ValueError("该任务已达到最多2次重试限制，请检查页面或配置后新建任务")
-            DB.update_run(run["id"], status="queued", error="", attempts=int(run["attempts"] or 0) + 1)
+            DB.update_run(run["id"], status="queued", error="", attempts=int(run["attempts"] or 0) + 1, resolution="")
             enqueue_automation_run(run["id"])
             return self.send_json(DB.get_run(run["id"]))
 
@@ -2865,7 +2906,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.send_json({"ok": True})
 
         if path == "/api/automation/launch":
-            return self.send_json(AUTOMATION.launch_chrome())
+            return self.send_json(BROWSER.start())
         return self.send_json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
 
     def do_DELETE(self):

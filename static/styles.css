@@ -478,6 +478,81 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   font-size: 18px;
 }
 .local-safety-strip .danger strong { color: var(--danger); }
+.environment-status-panel {
+  display: grid;
+  gap: 14px;
+  margin: 0 0 18px;
+  padding: 0;
+  overflow: hidden;
+}
+.environment-heading {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 20px 14px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, #ffffff 0%, #fbfcfa 100%);
+}
+.environment-heading h2 { margin: 0; font-size: 20px; letter-spacing: -.02em; }
+.environment-actions { flex-wrap: wrap; justify-content: flex-end; }
+.environment-status-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(110px, 1fr));
+  gap: 8px;
+  padding: 0 18px;
+}
+.environment-status-grid article {
+  min-width: 0;
+  padding: 12px 13px;
+  border: 1px solid #e2e8e0;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+.environment-status-grid span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+}
+.environment-status-grid strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 13px;
+}
+.environment-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  padding: 0 18px 4px;
+}
+.environment-detail span,
+.environment-detail a {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.environment-detail span {
+  padding: 7px 9px;
+  border-radius: 999px;
+  color: #526057;
+  background: #edf1eb;
+  font-size: 10px;
+  font-weight: 800;
+}
+.environment-detail a { color: var(--blue); text-decoration: none; }
+.environment-alert {
+  margin: 0 18px 18px;
+  padding: 11px 12px;
+  border: 1px solid #efc4be;
+  border-radius: 8px;
+  color: #87352c;
+  background: #fff4f2;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.55;
+}
 .workflow-overview {
   margin: 0 0 18px;
   border: 1px solid var(--line);
@@ -1432,6 +1507,9 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   .dashboard-hero { grid-template-columns: 1fr; }
   .metric-grid { grid-template-columns: repeat(3, 1fr); }
   .local-safety-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .environment-heading { align-items: flex-start; flex-direction: column; }
+  .environment-actions { justify-content: flex-start; }
+  .environment-status-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .qualified-item { grid-template-columns: 1fr; }
   .pool-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .workflow-steps { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
@@ -1450,6 +1528,10 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 @media (max-width: 760px) {
   .dashboard-hero { padding-top: 40px; }
   .local-safety-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .environment-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0 14px; }
+  .environment-heading { padding: 16px; }
+  .environment-detail { padding: 0 14px 2px; }
+  .environment-alert { margin: 0 14px 16px; }
   .qualified-pool { padding: 0 16px 16px; }
   .image-workbench-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .image-workbench-metrics article:nth-child(3n) { border-right: 1px solid var(--line); }
