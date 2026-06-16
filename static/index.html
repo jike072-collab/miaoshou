@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101a14">
+  <title>妙手智能选品工作台</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="#">
+      <span class="brand-mark">妙</span>
+      <span><strong>妙手智能选品</strong><small>SEA PRODUCT COMMAND CENTER</small></span>
+    </a>
+    <nav class="top-actions">
+      <span id="runtime-badge" class="local-badge"><i></i> 演练模式</span>
+      <a class="button ghost small" href="/api/export.csv">导出商品</a>
+    </nav>
+  </header>
+
+  <main class="app-shell">
+    <section class="dashboard-hero">
+      <div>
+        <p class="eyebrow">EVALUATE FIRST · COLLECT SECOND · PUBLISH WITH CONTROL</p>
+        <h1>先评估，再采集。<br><em>把好商品铺到五国店群。</em></h1>
+      </div>
+      <div class="metric-grid">
+        <article><span>候选商品</span><strong id="metric-candidates">0</strong></article>
+        <article><span>已达标</span><strong id="metric-qualified">0</strong></article>
+        <article><span>正式商品</span><strong id="metric-products">0</strong></article>
+      </div>
+    </section>
+
+    <nav class="module-tabs" aria-label="工作模块">
+      <button class="module-tab active" data-view="candidates">01 选品雷达</button>
+      <button class="module-tab" data-view="products">02 图片工厂</button>
+      <button class="module-tab" data-view="publish">03 铺货控制台</button>
+      <button class="module-tab" data-view="settings">04 系统设置</button>
+    </nav>
+
+    <section id="view-candidates" class="module-view">
+      <div class="action-grid">
+        <article class="panel dark-panel">
+          <div class="panel-title"><span class="step-number">A</span><div><h2>链接候选</h2><p>每行一个1688商品链接，最多200个</p></div></div>
+          <textarea id="candidate-links" rows="5" placeholder="https://detail.1688.com/offer/123456.html"></textarea>
+          <button id="import-links" class="button accent" type="button">导入待评估候选</button>
+        </article>
+        <article class="panel">
+          <div class="panel-title"><span class="step-number light-step">B</span><div><h2>关键词找品</h2><p>生成1688搜索任务，不会直接采集</p></div></div>
+          <div class="keyword-presets">
+            <button type="button" data-keyword="运动鞋">运动鞋</button>
+            <button type="button" data-keyword="健身包">运动包</button>
+            <button type="button" data-keyword="运动套装">运动套装</button>
+          </div>
+          <div class="inline-form"><input id="search-keyword" placeholder="输入自定义关键词"><button id="create-search" class="button dark" type="button">创建找品任务</button></div>
+          <p id="search-result" class="muted-line">任务会在专用Chrome连接后执行。</p>
+        </article>
+      </div>
+
+      <article class="panel table-panel">
+        <div class="table-toolbar">
+          <div><p class="eyebrow">CANDIDATE POOL</p><h2>候选商品与五国评分</h2></div>
+          <div class="toolbar-actions">
+            <button id="refresh-selected" class="button outline" type="button">从来源补全选中</button>
+            <button id="evaluate-selected" class="button outline" type="button">评估选中</button>
+            <button id="collect-qualified" class="button accent" type="button">采集达标商品</button>
+          </div>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th><input id="select-all-candidates" type="checkbox"></th><th>候选商品</th><th>类目/供货</th><th>MY</th><th>PH</th><th>SG</th><th>TH</th><th>VN</th><th>状态</th><th></th></tr></thead>
+            <tbody id="candidate-table"></tbody>
+          </table>
+        </div>
+        <div id="candidate-empty" class="table-empty">导入链接或创建关键词找品任务后，候选商品会显示在这里。</div>
+      </article>
+    </section>
+
+    <section id="view-products" class="module-view hidden">
+      <div class="section-intro"><div><p class="eyebrow">IMAGE FACTORY</p><h2>商品与AI图片</h2></div><p>仅采集成功的正式商品进入此处。生图失败或未审核时不会进入发布队列。</p></div>
+      <div id="product-cards" class="product-card-grid"></div>
+      <div id="product-empty" class="large-empty"><span>02</span><h3>还没有正式商品</h3><p>完成妙手插件采集并同步后，商品会进入图片工厂。</p><button id="create-demo-product" class="button outline" type="button">从达标候选创建演示商品</button></div>
+    </section>
+
+    <section id="view-publish" class="module-view hidden">
+      <div class="action-grid publish-grid">
+        <article class="panel">
+          <div class="panel-title"><span class="step-number light-step">C</span><div><h2>店铺配置</h2><p>每个妙手账号可配置多个五国店铺</p></div></div>
+          <form id="shop-form" class="compact-form">
+            <input name="accountName" placeholder="妙手账号名称" required>
+            <input name="entityName" placeholder="主体名称">
+            <input name="shopName" placeholder="店铺名称" required>
+            <select name="market"><option value="MY">马来西亚</option><option value="PH">菲律宾</option><option value="SG">新加坡</option><option value="TH">泰国</option><option value="VN">越南</option></select>
+            <input name="warehouse" placeholder="默认仓库">
+            <input name="defaultInventory" type="number" value="20" min="0" placeholder="默认库存">
+            <input name="priceMultiplier" type="number" value="1" min="0.01" step="0.01" placeholder="售价系数">
+            <button class="button dark" type="submit">添加店铺</button>
+          </form>
+          <div id="shop-list" class="shop-list"></div>
+        </article>
+        <article class="panel">
+          <div class="panel-title"><span class="step-number light-step">D</span><div><h2>创建铺货批次</h2><p>最多50款商品和20家店铺</p></div></div>
+          <form id="batch-form" class="compact-form">
+            <input name="name" placeholder="批次名称" value="五国运动户外铺货">
+            <div><span class="mini-label">选择商品</span><div id="batch-products" class="check-list"></div></div>
+            <div><span class="mini-label">选择店铺</span><div id="batch-shops" class="check-list"></div></div>
+            <label class="switch-row"><input name="dryRun" type="checkbox" checked> 演练模式：填写和校验，但不最终发布</label>
+            <button class="button accent" type="submit">创建批次</button>
+          </form>
+        </article>
+      </div>
+      <article class="panel table-panel">
+        <div class="table-toolbar"><div><p class="eyebrow">PUBLISH BATCHES</p><h2>铺货批次</h2></div></div>
+        <div id="batch-list" class="run-list"></div>
+      </article>
+      <article class="panel table-panel">
+        <div class="table-toolbar"><div><p class="eyebrow">AUTOMATION QUEUE</p><h2>自动化任务</h2></div><button id="refresh-runs" class="button outline" type="button">刷新状态</button></div>
+        <div id="run-list" class="run-list"></div>
+      </article>
+    </section>
+
+    <section id="view-settings" class="module-view hidden">
+      <div class="settings-grid">
+        <form id="image-settings" class="panel settings-card">
+          <p class="eyebrow">IMAGE RELAY</p><h2>图片中转站</h2>
+          <label><span>协议</span><select name="image.protocol"><option value="openai">OpenAI兼容</option><option value="custom">自定义JSON</option></select></label>
+          <label><span>Base URL</span><input name="image.base_url" placeholder="https://your-relay.example.com"></label>
+          <label><span>接口路径</span><input name="image.path" value="/v1/images/edits"></label>
+          <label><span>模型</span><input name="image.model" value="gpt-image-1"></label>
+          <label><span>文本接口路径</span><input name="text.path" value="/v1/chat/completions"></label>
+          <label><span>文本模型</span><input name="text.model" value="gpt-4.1-mini"></label>
+          <label><span>API Key</span><input name="image.api_key" type="password" placeholder="留空则保持现有Key"></label>
+          <div class="two-columns"><label><span>超时秒数</span><input name="image.timeout" type="number" value="120"></label><label><span>失败重试</span><input name="image.retries" type="number" value="2"></label></div>
+          <label><span>最大并发生图数（重启后生效）</span><input name="image.concurrency" type="number" min="1" max="8" value="2"></label>
+          <label><span>自定义请求模板（JSON）</span><textarea name="image.request_template" rows="5">{"model":"{{model}}","prompt":"{{prompt}}","image":"data:image/jpeg;base64,{{image_base64}}"}</textarea></label>
+          <label><span>图片响应路径（可选）</span><input name="image.response_path" placeholder="例如 result.images"></label>
+          <label><span>异步任务ID路径（可选）</span><input name="image.task_id_path" placeholder="例如 data.task_id"></label>
+          <label><span>异步查询路径（可选）</span><input name="image.query_path" placeholder="例如 /v1/tasks/{{taskId}}"></label>
+          <div class="two-columns"><label><span>任务状态路径</span><input name="image.status_path" value="status"></label><label><span>轮询秒数</span><input name="image.poll_interval" type="number" step="0.2" value="2"></label></div>
+          <div class="two-columns"><label><span>完成状态（逗号分隔）</span><input name="image.completed_statuses" value="succeeded,completed,success"></label><label><span>失败状态（逗号分隔）</span><input name="image.failed_statuses" value="failed,error,cancelled"></label></div>
+          <button class="button dark" type="submit">保存生图设置</button>
+        </form>
+        <form id="automation-settings" class="panel settings-card">
+          <p class="eyebrow">MIAOSHOU AUTOMATION</p><h2>Chrome与妙手</h2>
+          <label><span>执行模式</span><select name="automation.mode"><option value="dry_run">演练模式</option><option value="live">真实模式</option></select></label>
+          <label><span>Chrome路径</span><input name="automation.chrome_path"></label>
+          <label><span>CDP端口</span><input name="automation.cdp_port" type="number" value="9222"></label>
+          <label><span>妙手入口</span><input name="automation.miaoshou_url"></label>
+          <label><span>1688入口</span><input name="automation.alibaba_url"></label>
+          <label><span>妙手插件解压目录</span><input name="automation.plugin_unpack_dir" placeholder="启动专用Chrome后在扩展页加载此目录"></label>
+          <label><span>妙手插件扩展ID（可选）</span><input name="automation.plugin_extension_id" placeholder="用于准确识别官方插件"></label>
+          <label><span>采集箱认领动作配方（JSON）</span><textarea name="automation.collection_recipe" rows="5" placeholder='[{"type":"navigate","url":"https://...","label":"打开公用采集箱"}]'></textarea></label>
+          <label><span>链接采集兜底配方（JSON）</span><textarea name="automation.link_collection_recipe" rows="5" placeholder='[{"type":"navigate","url":"https://..."},{"type":"fill","selector":"textarea","value":"{{sourceUrl}}"}]'></textarea></label>
+          <label><span>发布动作配方（JSON）</span><textarea name="automation.publish_recipe" rows="8" placeholder='[{"type":"fill","selector":"input[name=title]","value":"{{title}}","phase":"prepare"}]'></textarea></label>
+          <div id="preflight-list" class="preflight-list"></div>
+          <div class="control-buttons"><button class="button outline" id="check-automation" type="button">环境检查</button><button class="button dark" id="launch-chrome" type="button">启动专用Chrome</button></div>
+          <div class="control-buttons"><button class="button outline" id="full-selfcheck" type="button">运行完整自检</button><button class="button dark" id="repair-selfcheck" type="button">自检并自动修复</button></div>
+          <div id="selfcheck-list" class="preflight-list"></div>
+          <p id="selfcheck-result" class="muted-line"></p>
+          <button class="button dark" type="submit">保存自动化设置</button>
+        </form>
+        <form id="evaluation-settings" class="panel settings-card">
+          <p class="eyebrow">EVALUATION GATE</p><h2>评估门槛</h2>
+          <label><span>自动采集分数</span><input name="evaluation.threshold" type="number" value="70"></label>
+          <label><span>最低置信度</span><input name="evaluation.min_confidence" type="number" value="70"></label>
+          <label><span>最低毛利率</span><input name="evaluation.min_margin" type="number" value="20"></label>
+          <div class="two-columns"><label><span>平台费率 %</span><input name="market.platform_fee_pct" type="number" step="0.1" value="12"></label><label><span>目标利润率 %</span><input name="market.target_margin_pct" type="number" step="0.1" value="25"></label></div>
+          <h3 class="subheading">五国汇率与物流成本（CNY）</h3>
+          <div class="two-columns"><label><span>MY 汇率</span><input name="market.MY.exchange" type="number" step="0.0001" value="0.65"></label><label><span>MY 运费</span><input name="market.MY.shipping_cny" type="number" step="0.01" value="18"></label></div>
+          <div class="two-columns"><label><span>PH 汇率</span><input name="market.PH.exchange" type="number" step="0.0001" value="7.8"></label><label><span>PH 运费</span><input name="market.PH.shipping_cny" type="number" step="0.01" value="22"></label></div>
+          <div class="two-columns"><label><span>SG 汇率</span><input name="market.SG.exchange" type="number" step="0.0001" value="0.19"></label><label><span>SG 运费</span><input name="market.SG.shipping_cny" type="number" step="0.01" value="25"></label></div>
+          <div class="two-columns"><label><span>TH 汇率</span><input name="market.TH.exchange" type="number" step="0.0001" value="4.9"></label><label><span>TH 运费</span><input name="market.TH.shipping_cny" type="number" step="0.01" value="21"></label></div>
+          <div class="two-columns"><label><span>VN 汇率</span><input name="market.VN.exchange" type="number" step="0.0001" value="3500"></label><label><span>VN 运费</span><input name="market.VN.shipping_cny" type="number" step="0.01" value="20"></label></div>
+          <button class="button dark" type="submit">保存评估规则</button>
+        </form>
+      </div>
+    </section>
+  </main>
+
+  <dialog id="candidate-dialog">
+    <form id="candidate-form" class="dialog-shell">
+      <div class="dialog-header"><div><p class="eyebrow">SUPPLIER INPUT</p><h2>补充供应与市场数据</h2></div><button class="close-button" type="button" data-close-dialog>×</button></div>
+      <input name="id" type="hidden">
+      <div class="candidate-edit-grid">
+        <label><span>商品标题</span><input name="title"></label>
+        <label><span>类目</span><select name="category"><option>运动鞋</option><option>运动包</option><option>运动套装</option></select></label>
+        <label><span>采购价 CNY</span><input name="source_price" type="number" step="0.01"></label>
+        <label><span>重量 g</span><input name="weight_g" type="number"></label>
+        <label><span>月销量</span><input name="monthly_sales" type="number"></label>
+        <label><span>复购率 %</span><input name="repurchase_rate" type="number" step="0.1"></label>
+        <label><span>评分</span><input name="rating" type="number" step="0.1" max="5"></label>
+        <label><span>供应商年限</span><input name="supplier_years" type="number" step="0.5"></label>
+        <label><span>发货小时</span><input name="dispatch_hours" type="number"></label>
+        <label><span>图片数量</span><input name="image_count" type="number"></label>
+        <label class="switch-row"><input name="sku_complete" type="checkbox"> 颜色、尺码和SKU完整</label>
+      </div>
+      <h3 class="subheading">五国市场数据</h3>
+      <div id="market-inputs" class="market-input-grid"></div>
+      <div class="dialog-footer"><span>没有真实市场数据时，置信度不会达到自动采集要求。</span><div><button class="button outline" type="button" data-refresh-source>从来源补全</button><button class="button ghost" type="button" data-close-dialog>取消</button><button class="button accent" type="submit">保存并评估</button></div></div>
+    </form>
+  </dialog>
+
+  <dialog id="image-dialog">
+    <form id="generation-form" class="dialog-shell">
+      <div class="dialog-header"><div><p class="eyebrow">GPT IMAGE</p><h2>创建生图任务</h2></div><button class="close-button" type="button" data-close-dialog>×</button></div>
+      <input name="productId" type="hidden">
+      <label class="field"><span>生成档位</span><select name="preset"><option value="basic">基础档：1张白底主图</option><option value="standard" selected>标准档：主图+2场景图</option><option value="detail">详情档：主图+2场景+2细节</option><option value="custom">自定义</option></select></label>
+      <div id="custom-kinds" class="check-list hidden"><label><input type="checkbox" value="main" checked>主图</label><label><input type="checkbox" value="scene" checked>场景图</label><label><input type="checkbox" value="detail">细节图</label></div>
+      <label class="field full"><span>附加风格要求</span><textarea name="extraPrompt" rows="4" placeholder="例如：简洁、专业、偏户外生活方式。强制商品保真约束始终有效。"></textarea></label>
+      <div class="dialog-footer"><span>生成图片必须审核后才能进入铺货批次。</span><button class="button accent" type="submit">开始生成</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="market-dialog">
+    <form id="market-form" class="dialog-shell">
+      <div class="dialog-header"><div><p class="eyebrow">FIVE MARKET VERSIONS</p><h2>五国资料与定价</h2></div><button class="close-button" type="button" data-close-dialog>×</button></div>
+      <input name="productId" type="hidden">
+      <div id="market-version-fields" class="market-version-fields"></div>
+      <div class="dialog-footer"><span>风险拦截的国家不能进入发布批次。</span><button class="button accent" type="submit">保存五国版本</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="asset-dialog">
+    <div class="dialog-shell">
+      <div class="dialog-header"><div><p class="eyebrow">ASSET REVIEW</p><h2>图片审核</h2></div><button class="close-button" type="button" data-close-dialog>×</button></div>
+      <div id="asset-review-grid" class="asset-review-grid"></div>
+    </div>
+  </dialog>
+
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
