@@ -23,6 +23,26 @@ class DatabaseTest(unittest.TestCase):
         ])[0]
         self.assertEqual(item["source_product_id"], "987654321")
 
+    def test_candidate_can_store_real_1688_search_fields(self):
+        item = self.db.import_candidates(["https://detail.1688.com/offer/123456.html"], keyword="运动鞋")[0]
+        updated = self.db.update_candidate(item["id"], {
+            "min_order": 2,
+            "sales_text": "已售 3000 件",
+            "supplier_name": "晋江鞋业",
+            "shop_url": "https://shop.1688.com/",
+            "origin_place": "福建泉州",
+            "search_page": 1,
+            "search_rank": 8,
+        })
+
+        self.assertEqual(updated["min_order"], 2)
+        self.assertEqual(updated["sales_text"], "已售 3000 件")
+        self.assertEqual(updated["supplier_name"], "晋江鞋业")
+        self.assertEqual(updated["shop_url"], "https://shop.1688.com/")
+        self.assertEqual(updated["origin_place"], "福建泉州")
+        self.assertEqual(updated["search_page"], 1)
+        self.assertEqual(updated["search_rank"], 8)
+
     def test_product_round_trip(self):
         product = self.db.save_product({
             "title": "运动鞋", "sourceUrl": "https://example.com/p",

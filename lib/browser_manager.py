@@ -8,7 +8,7 @@ import subprocess
 import time
 from pathlib import Path
 from urllib.error import URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 from urllib.request import Request
 
 from lib.automation import AutomationEngine, local_urlopen
@@ -85,9 +85,32 @@ class BrowserManager:
             "error": error,
         }
 
-    def start(self):
+    def start_pages(self):
+        return [
+            self.db.setting("automation.miaoshou_url", "https://erp.91miaoshou.com/"),
+            self.db.setting("automation.alibaba_url", "https://www.1688.com/"),
+        ]
+
+    def ensure_tabs(self, pages):
+        targets = self.targets()
+        for url in pages:
+            hostname = (urlparse(url).hostname or "").removeprefix("www.")
+            has_target = any(hostname and hostname in (item.get("url") or "") for item in targets)
+            if not has_target:
+                self.open_tab(url)
+
+    def start_alibaba(self):
+        return self.start(
+            pages=[self.db.setting("automation.alibaba_url", "https://www.1688.com/")],
+            ensure_pages=True,
+        )
+
+    def start(self, pages=None, ensure_pages=False):
+        pages = [str(url).strip() for url in (pages or self.start_pages()) if str(url).strip()]
         if self.cdp_ready():
             self.last_error = None
+            if ensure_pages:
+                self.ensure_tabs(pages)
             return self.status()
         chrome = self.chrome_path()
         if not chrome.is_file():
@@ -96,10 +119,6 @@ class BrowserManager:
         profile = self.profile_dir()
         profile.mkdir(parents=True, exist_ok=True)
         port = str(self.debug_port())
-        pages = [
-            self.db.setting("automation.miaoshou_url", "https://erp.91miaoshou.com/"),
-            self.db.setting("automation.alibaba_url", "https://www.1688.com/"),
-        ]
         try:
             self.process = subprocess.Popen([
                 str(chrome),

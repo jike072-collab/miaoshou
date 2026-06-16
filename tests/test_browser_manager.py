@@ -40,6 +40,17 @@ class BrowserManagerTest(unittest.TestCase):
         self.assertEqual(status["current_url"], "")
         self.assertIn("未找到", status["error"])
 
+    def test_start_alibaba_only_ensures_1688_tab_when_cdp_is_ready(self):
+        opened = []
+        with patch.object(self.manager, "cdp_ready", return_value=True), \
+                patch.object(self.manager, "targets", return_value=[]), \
+                patch.object(self.manager, "open_tab", side_effect=lambda url: opened.append(url)), \
+                patch.object(self.manager, "status", return_value={"cdp_ready": True}):
+            status = self.manager.start_alibaba()
+
+        self.assertEqual(status["cdp_ready"], True)
+        self.assertEqual(opened, ["https://www.1688.com/"])
+
     def test_platform_status_waits_for_manual_when_cdp_is_not_ready(self):
         with patch.object(self.manager, "status", return_value={
             "chrome_ready": True,

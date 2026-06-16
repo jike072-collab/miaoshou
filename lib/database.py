@@ -44,6 +44,13 @@ class Database:
             title TEXT NOT NULL DEFAULT '',
             category TEXT NOT NULL DEFAULT '',
             source_price REAL NOT NULL DEFAULT 0,
+            min_order INTEGER NOT NULL DEFAULT 0,
+            sales_text TEXT NOT NULL DEFAULT '',
+            supplier_name TEXT NOT NULL DEFAULT '',
+            shop_url TEXT NOT NULL DEFAULT '',
+            origin_place TEXT NOT NULL DEFAULT '',
+            search_page INTEGER NOT NULL DEFAULT 0,
+            search_rank INTEGER NOT NULL DEFAULT 0,
             monthly_sales INTEGER NOT NULL DEFAULT 0,
             repurchase_rate REAL NOT NULL DEFAULT 0,
             rating REAL NOT NULL DEFAULT 0,
@@ -59,6 +66,19 @@ class Database:
             collected_at INTEGER,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sourcing_runs (
+            run_id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            current_keyword TEXT NOT NULL DEFAULT '',
+            current_page INTEGER NOT NULL DEFAULT 0,
+            found_count INTEGER NOT NULL DEFAULT 0,
+            saved_count INTEGER NOT NULL DEFAULT 0,
+            skipped_count INTEGER NOT NULL DEFAULT 0,
+            failed_count INTEGER NOT NULL DEFAULT 0,
+            started_at INTEGER NOT NULL,
+            finished_at INTEGER,
+            error TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS evaluations (
             id TEXT PRIMARY KEY,
@@ -213,6 +233,18 @@ class Database:
         with self.lock, self.connect() as connection:
             connection.executescript(schema)
             columns = {row[1] for row in connection.execute("PRAGMA table_info(automation_runs)")}
+            candidate_columns = {row[1] for row in connection.execute("PRAGMA table_info(candidates)")}
+            for name, definition in (
+                ("min_order", "INTEGER NOT NULL DEFAULT 0"),
+                ("sales_text", "TEXT NOT NULL DEFAULT ''"),
+                ("supplier_name", "TEXT NOT NULL DEFAULT ''"),
+                ("shop_url", "TEXT NOT NULL DEFAULT ''"),
+                ("origin_place", "TEXT NOT NULL DEFAULT ''"),
+                ("search_page", "INTEGER NOT NULL DEFAULT 0"),
+                ("search_rank", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if name not in candidate_columns:
+                    connection.execute("ALTER TABLE candidates ADD COLUMN %s %s" % (name, definition))
             if "context" not in columns:
                 connection.execute("ALTER TABLE automation_runs ADD COLUMN context TEXT NOT NULL DEFAULT '{}'")
             if "diagnostics" not in columns:
@@ -400,6 +432,8 @@ class Database:
     def update_candidate(self, candidate_id, values):
         allowed = {
             "source_product_id", "keyword", "title", "category", "source_price",
+            "min_order", "sales_text", "supplier_name", "shop_url", "origin_place",
+            "search_page", "search_rank",
             "monthly_sales", "repurchase_rate", "rating", "supplier_years",
             "dispatch_hours", "weight_g", "image_count", "sku_complete",
             "risk_flags", "images", "status", "collection_channel", "collected_at",
@@ -538,6 +572,41 @@ class Database:
 
     def delete_candidate(self, candidate_id):
         return self.execute("DELETE FROM candidates WHERE id = ?", (candidate_id,))
+
+    def create_sourcing_run(self):
+        run_id = uuid.uuid4().hex
+        now = int(time.time())
+        self.execute(
+            """INSERT INTO sourcing_runs(
+                run_id,status,current_keyword,current_page,found_count,saved_count,
+                skipped_count,failed_count,started_at,error
+            ) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (run_id, "idle", "", 0, 0, 0, 0, 0, now, ""),
+        )
+        return self.get_sourcing_run(run_id)
+
+    def update_sourcing_run(self, run_id, **values):
+        allowed = {
+            "status", "current_keyword", "current_page", "found_count",
+            "saved_count", "skipped_count", "failed_count", "finished_at", "error",
+        }
+        columns, params = [], []
+        for key, value in values.items():
+            if key not in allowed:
+                continue
+            columns.append("%s = ?" % key)
+            params.append(value)
+        if not columns:
+            return self.get_sourcing_run(run_id)
+        params.append(run_id)
+        self.execute("UPDATE sourcing_runs SET %s WHERE run_id = ?" % ", ".join(columns), params)
+        return self.get_sourcing_run(run_id)
+
+    def get_sourcing_run(self, run_id):
+        return self.row("SELECT * FROM sourcing_runs WHERE run_id = ?", (run_id,))
+
+    def latest_sourcing_run(self):
+        return self.row("SELECT * FROM sourcing_runs ORDER BY started_at DESC LIMIT 1")
 
     def create_run(self, kind, steps, batch_id=None, candidate_id=None, status="queued", context=None):
         run_id = uuid.uuid4().hex

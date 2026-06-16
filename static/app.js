@@ -1,4 +1,4 @@
-const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, batchPreview: null, workflow: [], settings: {}, browserStatus: {}, platformStatus: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null, localStatus: {}, workbenchToken: "" };
+const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, sourcing: { run: {}, config: {}, status: "idle" }, batchPreview: null, workflow: [], settings: {}, browserStatus: {}, platformStatus: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null, localStatus: {}, workbenchToken: "" };
 const markets = { MY: "马来西亚", PH: "菲律宾", SG: "新加坡", TH: "泰国", VN: "越南" };
 const workflowTargets = {
   import_candidates: "candidates",
@@ -151,13 +151,14 @@ function renderLocalStatus(status = {}) {
 }
 
 async function loadAll() {
-  const [localStatus, browserStatus, platformStatus, dashboard, workflow, candidates, products, shops, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue, settings, selfcheck] = await Promise.all([
-    api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/shops"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`), api("/api/settings"), api("/api/selfcheck"),
+  const [localStatus, browserStatus, platformStatus, sourcing, dashboard, workflow, candidates, products, shops, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue, settings, selfcheck] = await Promise.all([
+    api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"), api("/api/sourcing/current"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/shops"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`), api("/api/settings"), api("/api/selfcheck"),
   ]);
   state.localStatus = localStatus;
   state.workbenchToken = localStatus.token || "";
   state.browserStatus = browserStatus;
   state.platformStatus = platformStatus;
+  state.sourcing = sourcing;
   state.workflow = workflow.steps || [];
   state.candidates = candidates.items;
   state.products = products.items;
@@ -175,6 +176,7 @@ async function loadAll() {
   $("#runtime-badge").innerHTML = `<i></i> ${localStatus.mode === "real" ? "真实模式" : "演练模式"}`;
   renderLocalStatus(localStatus);
   renderWorkflow();
+  renderSourcingStatus();
   renderQualifiedPool();
   renderCollectionQueue();
   renderCandidates();
@@ -219,6 +221,50 @@ function renderWorkflow() {
     activateView(button.dataset.workflowTarget);
     $(".module-tabs")?.scrollIntoView({ behavior: "smooth", block: "start" });
   }));
+}
+
+const sourcingStatusText = {
+  idle: "空闲",
+  starting_browser: "启动浏览器",
+  checking_login: "检查登录",
+  searching: "搜索中",
+  extracting_results: "提取结果",
+  saving_candidates: "保存候选",
+  waiting_for_manual: "等待人工",
+  completed: "已完成",
+  failed: "失败",
+  stopped: "已停止",
+};
+
+function renderSourcingStatus(data = state.sourcing) {
+  const wrap = $("#sourcing-status");
+  if (!wrap) return;
+  const run = data.run || {};
+  const config = data.config || {};
+  const active = Boolean(data.active);
+  const status = run.status || data.status || "idle";
+  const keywords = config.keywords || [];
+  wrap.innerHTML = `
+    <div class="sourcing-metrics">
+      <article><span>状态</span><strong class="${status === "failed" || status === "waiting_for_manual" ? "check-warn" : "check-ok"}">${esc(sourcingStatusText[status] || status)}</strong></article>
+      <article><span>当前关键词</span><strong>${esc(run.current_keyword || "-")}</strong></article>
+      <article><span>当前页码</span><strong>${Number(run.current_page || 0)}</strong></article>
+      <article><span>找到</span><strong>${Number(run.found_count || 0)}</strong></article>
+      <article><span>保存</span><strong>${Number(run.saved_count || 0)}</strong></article>
+      <article><span>跳过</span><strong>${Number(run.skipped_count || 0)}</strong></article>
+    </div>
+    <div class="sourcing-detail">
+      <span>关键词：${esc(keywords.join("、") || "-")}</span>
+      <span>每词页数：${Number(config.max_pages_per_keyword || 0)}</span>
+      <span>每轮上限：${Number(config.max_items_per_run || 0)}</span>
+      <span>运行ID：${esc(run.run_id || "-")}</span>
+    </div>
+    ${run.error ? `<p class="environment-alert">${esc(run.error)}</p>` : ""}
+  `;
+  $("#sourcing-start").disabled = active;
+  $("#sourcing-pause").disabled = !active;
+  $("#sourcing-resume").disabled = status !== "waiting_for_manual";
+  $("#sourcing-stop").disabled = !active && !["waiting_for_manual", "starting_browser", "checking_login", "searching", "extracting_results", "saving_candidates"].includes(status);
 }
 
 function renderQualifiedPool() {
@@ -359,9 +405,17 @@ function renderCandidates() {
     const scores = Object.keys(markets).map((market) => `<td>${marketChip(item, market)}</td>`).join("");
     const images = Number(item.image_count || (item.images || []).length || 0);
     const riskFlags = (item.risk_flags || []).join("、") || "无";
+    const sourceMeta = [
+      item.supplier_name ? `供应商 ${item.supplier_name}` : "",
+      item.min_order ? `起批 ${item.min_order}` : "",
+      item.origin_place ? `发货地 ${item.origin_place}` : "",
+      item.sales_text ? item.sales_text : "",
+      item.search_page ? `第 ${item.search_page} 页` : "",
+      item.search_rank ? `第 ${item.search_rank} 名` : "",
+    ].filter(Boolean);
     tr.innerHTML = `
       <td><input class="candidate-check" type="checkbox" value="${esc(item.id)}"></td>
-      <td><div class="candidate-name"><strong>${esc(item.title || `1688商品 ${item.source_product_id || "待识别"}`)}</strong><a href="${esc(item.source_url)}" target="_blank" rel="noreferrer">${esc(item.source_product_id || "查看来源")}</a></div></td>
+      <td><div class="candidate-name"><strong>${esc(item.title || `1688商品 ${item.source_product_id || "待识别"}`)}</strong><a href="${esc(item.source_url)}" target="_blank" rel="noreferrer">${esc(item.source_product_id || "查看来源")}</a><div class="candidate-source-meta">${sourceMeta.map((meta) => `<span>${esc(meta)}</span>`).join("")}</div></div></td>
       <td><span>${esc(item.category || "待补充")}</span><small>¥${Number(item.source_price || 0).toFixed(2)} · ${Number(item.weight_g || 0)}g · SKU${item.sku_complete ? "完整" : "缺失"} · 图${images}</small>${renderCompleteness(item)}<small>风险：${esc(riskFlags)}</small></td>
       <td>${renderFieldStatus(item)}</td>
       <td>${renderMissingHints(item)}<button class="inline-next" data-candidate-next="${esc(item.id)}" type="button">${esc(item.nextAction || "补数据")}</button><small class="market-summary-line">${esc(item.marketSummary?.nextAction || "")}${item.dataCompleteness?.marketDataComplete ? " · 市场数据完整" : " · 市场数据待补"}${item.marketSummary?.qualifiedCount ? ` · 达标 ${item.marketSummary.qualifiedCount} 国` : ""}</small></td>
@@ -937,8 +991,8 @@ async function refreshRuns() {
 async function pollRuntime() {
   if (document.hidden) return;
   try {
-    const [localStatus, browserStatus, platformStatus, dashboard, workflow, candidates, products, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue] = await Promise.all([
-      api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`),
+    const [localStatus, browserStatus, platformStatus, sourcing, dashboard, workflow, candidates, products, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue] = await Promise.all([
+      api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"), api("/api/sourcing/current"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`),
     ]);
     const selected = new Set(selectedCandidates());
     const selectedProducts = new Set($$("#batch-products input:checked").map((input) => input.value));
@@ -947,6 +1001,7 @@ async function pollRuntime() {
     state.workbenchToken = localStatus.token || state.workbenchToken;
     state.browserStatus = browserStatus;
     state.platformStatus = platformStatus;
+    state.sourcing = sourcing;
     state.workflow = workflow.steps || [];
     state.candidates = candidates.items;
     state.products = products.items;
@@ -963,6 +1018,7 @@ async function pollRuntime() {
     renderLocalStatus(localStatus);
     renderEnvironmentStatus(browserStatus, platformStatus, localStatus);
     renderWorkflow();
+    renderSourcingStatus();
     renderQualifiedPool();
     renderCollectionQueue();
     renderCandidates();
@@ -1007,6 +1063,27 @@ $("#create-search").addEventListener("click", async () => {
     await refreshRuns();
   } catch (error) { notify(error.message, "error"); }
 });
+
+async function sourcingAction(action, message) {
+  const button = $(`#sourcing-${action}`);
+  if (button) button.disabled = true;
+  try {
+    const data = await api(`/api/sourcing/${action}`, { method: "POST", body: "{}" });
+    state.sourcing = data;
+    renderSourcingStatus();
+    notify(message);
+    await loadAll();
+  } catch (error) {
+    notify(error.message, "error");
+  } finally {
+    renderSourcingStatus();
+  }
+}
+
+$("#sourcing-start").addEventListener("click", () => sourcingAction("start", "真实 1688 找品已启动"));
+$("#sourcing-pause").addEventListener("click", () => sourcingAction("pause", "真实找品已暂停"));
+$("#sourcing-resume").addEventListener("click", () => sourcingAction("resume", "真实找品已继续"));
+$("#sourcing-stop").addEventListener("click", () => sourcingAction("stop", "真实找品已停止"));
 
 $("#select-all-candidates").addEventListener("change", (event) => $$(".candidate-check").forEach((input) => { input.checked = event.target.checked; }));
 

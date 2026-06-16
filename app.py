@@ -25,6 +25,7 @@ from lib.image_gateway import ImageGatewayError, generate
 from lib.keychain import get_secret, set_secret
 from lib.local_config import config_status, ensure_local_runtime, load_config, load_or_create_token, save_config
 from lib.prompts import PRESETS, build_prompts
+from lib.real1688_adapter import Real1688Adapter, SOURCING_ACTIVE_STATUSES
 from lib.text_gateway import TextGatewayError, localize
 
 
@@ -36,9 +37,12 @@ ASSET_DIR = DATA_DIR / "assets"
 DB = Database(DATA_DIR / "workbench.db")
 AUTOMATION = AutomationEngine(DB, DATA_DIR)
 BROWSER = BrowserManager(DB, DATA_DIR)
+SOURCING = Real1688Adapter(DB, DATA_DIR, BROWSER)
 WORKBENCH_TOKEN = load_or_create_token(DATA_DIR)
 RUN_LOCK = threading.Lock()
 ACTIVE_RUNS = set()
+SOURCING_LOCK = threading.Lock()
+ACTIVE_SOURCING_RUNS = set()
 GENERATION_LOCK = threading.Lock()
 ACTIVE_GENERATIONS = set()
 GENERATION_SLOTS = threading.BoundedSemaphore(max(1, int(DB.setting("image.concurrency", 2))))
@@ -1599,11 +1603,49 @@ def enqueue_automation_run(run_id, confirm=False):
     return True
 
 
+def sourcing_current_status():
+    run = SOURCING.current()
+    limits = SOURCING.normalize_limits()
+    return {
+        "run": run,
+        "active": bool(run and run.get("run_id") in ACTIVE_SOURCING_RUNS),
+        "config": limits,
+        "status": run.get("status") if run else "idle",
+    }
+
+
+def execute_sourcing_run(run_id):
+    try:
+        SOURCING.run_once(run_id)
+    finally:
+        with SOURCING_LOCK:
+            ACTIVE_SOURCING_RUNS.discard(run_id)
+
+
+def enqueue_sourcing_run(run_id):
+    with SOURCING_LOCK:
+        if run_id in ACTIVE_SOURCING_RUNS:
+            return False
+        ACTIVE_SOURCING_RUNS.add(run_id)
+    threading.Thread(
+        target=execute_sourcing_run,
+        args=(run_id,),
+        daemon=True,
+        name="sourcing-run-" + run_id[:8],
+    ).start()
+    return True
+
+
 def recover_background_jobs():
     for job in DB.rows("SELECT id FROM generation_jobs WHERE status='queued'"):
         enqueue_generation(job["id"])
     for run in DB.rows("SELECT id FROM automation_runs WHERE status='queued'"):
         enqueue_automation_run(run["id"])
+    for run in DB.rows(
+        "SELECT run_id FROM sourcing_runs WHERE status IN (%s)" % ",".join("?" for _ in SOURCING_ACTIVE_STATUSES),
+        tuple(SOURCING_ACTIVE_STATUSES),
+    ):
+        DB.update_sourcing_run(run["run_id"], status="waiting_for_manual", error="服务重启后等待继续")
 
 
 def create_market_versions(product_id):
@@ -2485,6 +2527,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.send_json(BROWSER.status())
         if path == "/api/platform/status":
             return self.send_json(BROWSER.platform_status())
+        if path == "/api/sourcing/current":
+            return self.send_json(sourcing_current_status())
         if path == "/api/dashboard":
             candidates = DB.list_candidates()
             threshold = float(DB.setting("evaluation.threshold", 70))
@@ -2624,6 +2668,25 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if path == "/api/browser/restart":
             return self.send_json(BROWSER.restart())
+
+        if path == "/api/sourcing/start":
+            run = SOURCING.start_run()
+            enqueue_sourcing_run(run["run_id"])
+            return self.send_json(sourcing_current_status(), HTTPStatus.CREATED)
+
+        if path == "/api/sourcing/pause":
+            SOURCING.pause()
+            return self.send_json(sourcing_current_status())
+
+        if path == "/api/sourcing/resume":
+            run = SOURCING.resume()
+            if run.get("status") in ("starting_browser", "idle", "waiting_for_manual"):
+                enqueue_sourcing_run(run["run_id"])
+            return self.send_json(sourcing_current_status())
+
+        if path == "/api/sourcing/stop":
+            SOURCING.stop()
+            return self.send_json(sourcing_current_status())
 
         if path == "/api/candidates/import-links":
             raw = payload.get("urls") or []

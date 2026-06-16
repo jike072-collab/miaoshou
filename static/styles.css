@@ -553,6 +553,59 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   font-weight: 800;
   line-height: 1.55;
 }
+.sourcing-panel {
+  margin-top: 18px;
+  padding: 0;
+  overflow: hidden;
+}
+.sourcing-status {
+  display: grid;
+  gap: 12px;
+  padding: 0 18px 18px;
+}
+.sourcing-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+}
+.sourcing-metrics article {
+  min-width: 0;
+  padding: 12px 13px;
+  border: 1px solid #e2e8e0;
+  border-radius: 8px;
+  background: #f8faf6;
+}
+.sourcing-metrics span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 850;
+}
+.sourcing-metrics strong {
+  display: block;
+  overflow: hidden;
+  margin-top: 6px;
+  font-size: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sourcing-detail {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.sourcing-detail span {
+  max-width: 100%;
+  overflow: hidden;
+  padding: 7px 9px;
+  border-radius: 999px;
+  color: #526057;
+  background: #edf1eb;
+  font-size: 10px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .workflow-overview {
   margin: 0 0 18px;
   border: 1px solid var(--line);
@@ -811,6 +864,24 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 .candidate-name { max-width: 300px; }
 .candidate-name strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .candidate-name a { display: block; margin-top: 6px; color: var(--blue); text-decoration: none; font-size: 9px; font-weight: 700; }
+.candidate-source-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 7px;
+}
+.candidate-source-meta span {
+  max-width: 120px;
+  overflow: hidden;
+  padding: 4px 6px;
+  border-radius: 999px;
+  color: #526057;
+  background: #edf1eb;
+  font-size: 8px;
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .data-table td > small { display: block; margin-top: 4px; color: var(--muted); }
 .market-summary-line { display: block; margin-top: 7px; color: var(--muted); font-size: 9px; }
 .data-completeness { display: grid; grid-template-columns: 1fr auto; gap: 5px 8px; align-items: center; margin-top: 8px; width: 145px; }
@@ -1510,6 +1581,7 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   .environment-heading { align-items: flex-start; flex-direction: column; }
   .environment-actions { justify-content: flex-start; }
   .environment-status-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .sourcing-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .qualified-item { grid-template-columns: 1fr; }
   .pool-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .workflow-steps { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
@@ -1532,6 +1604,8 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   .environment-heading { padding: 16px; }
   .environment-detail { padding: 0 14px 2px; }
   .environment-alert { margin: 0 14px 16px; }
+  .sourcing-status { padding: 0 14px 16px; }
+  .sourcing-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .qualified-pool { padding: 0 16px 16px; }
   .image-workbench-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .image-workbench-metrics article:nth-child(3n) { border-right: 1px solid var(--line); }
