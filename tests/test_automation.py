@@ -51,6 +51,13 @@ class AutomationTest(unittest.TestCase):
         pages = [{"url": "https://www.1688.com/", "text": "采购车\n登录后更多精彩\n立即登录"}]
         self.assertFalse(AutomationEngine.alibaba_logged_in(pages))
 
+    def test_login_detection_accepts_1688_search_results(self):
+        pages = [{
+            "url": "https://s.1688.com/selloffer/offer_search.htm?keywords=%D4%CB%B6%AF%D0%AC",
+            "text": "运动鞋 ¥ 29 已售1.4万+件 1件起购 晋江龙衍鞋业有限公司",
+        }]
+        self.assertTrue(AutomationEngine.alibaba_logged_in(pages))
+
     def test_local_cdp_requests_bypass_system_proxy(self):
         with patch("lib.automation.build_opener") as build:
             build.return_value.open.side_effect = RuntimeError("stop")

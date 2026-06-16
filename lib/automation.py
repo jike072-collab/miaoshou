@@ -123,6 +123,10 @@ class AutomationEngine:
                 return False
             if any(marker in text for marker in ("采购车", "我的阿里", "收藏的品", "关注的店")):
                 return True
+            if any(marker in url for marker in ("offer_search", "detail.1688.com", "page/index.html")) and all(
+                marker in text for marker in ("¥", "起购")
+            ) and any(marker in text for marker in ("已售", "全网", "供应商", "店铺")):
+                return True
         return False
 
     @staticmethod
