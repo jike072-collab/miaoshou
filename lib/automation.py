@@ -317,11 +317,17 @@ class AutomationEngine:
                 stored = by_url.get(item["url"])
                 if stored:
                     images = [item["image"]] if item.get("image") else []
-                    self.db.update_candidate(stored["id"], {
+                    updates = {
                         "title": item.get("title", ""),
+                        "category": item.get("category") or "",
+                        "source_product_id": item.get("sourceProductId") or stored.get("source_product_id") or "",
+                        "source_price": item.get("sourcePrice") or stored.get("source_price") or 0,
+                        "monthly_sales": item.get("monthlySales") or stored.get("monthly_sales") or 0,
+                        "dispatch_hours": item.get("dispatchHours") or stored.get("dispatch_hours") or 0,
                         "images": images,
                         "image_count": len(images),
-                    })
+                    }
+                    self.db.update_candidate(stored["id"], updates)
             status = "completed"
         elif run["kind"] == "collection":
             has_claim = bool(self.db.setting("automation.collection_recipe", []))

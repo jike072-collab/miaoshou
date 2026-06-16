@@ -74,6 +74,11 @@ class AutomationTest(unittest.TestCase):
                 "url": "https://detail.1688.com/offer/123456.html",
                 "title": "透气运动鞋",
                 "image": "https://example.com/a.jpg",
+                "sourceProductId": "123456",
+                "category": "运动鞋",
+                "sourcePrice": 29.5,
+                "monthlySales": 14000,
+                "dispatchHours": 72,
             }],
         }
         with patch("lib.automation.subprocess.run") as run_command:
@@ -84,6 +89,11 @@ class AutomationTest(unittest.TestCase):
         self.assertEqual(result["status"], "completed")
         self.assertEqual(candidate["image_count"], 1)
         self.assertEqual(candidate["images"], ["https://example.com/a.jpg"])
+        self.assertEqual(candidate["source_product_id"], "123456")
+        self.assertEqual(candidate["category"], "运动鞋")
+        self.assertEqual(candidate["source_price"], 29.5)
+        self.assertEqual(candidate["monthly_sales"], 14000)
+        self.assertEqual(candidate["dispatch_hours"], 72)
 
 
 if __name__ == "__main__":

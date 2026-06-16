@@ -190,6 +190,40 @@ async function main() {
           }
           return '';
         };
+        const parsePrice = (text) => {
+          const normalized = String(text || '').replace(/¥\\s*(\\d+)\\s*\\.\\s*(\\d+)/g, '¥ $1.$2');
+          const match = normalized.match(/¥\\s*(\\d+(?:\\.\\d+)?)/);
+          return match ? Number(match[1]) : 0;
+        };
+        const parseSales = (text) => {
+          const normalized = String(text || '').replace(/\\s+/g, ' ');
+          const matches = Array.from(normalized.matchAll(/(?:已售|全网)?\\s*(\\d+(?:\\.\\d+)?)\\s*(万)?\\+?件/g));
+          for (const match of matches) {
+            const start = Math.max(0, match.index - 8);
+            const end = Math.min(normalized.length, match.index + match[0].length + 8);
+            const nearby = normalized.slice(start, end);
+            const after = normalized.slice(match.index + match[0].length, match.index + match[0].length + 4);
+            if (after.includes('起购')) continue;
+            const value = Number(match[1]) * (match[2] ? 10000 : 1);
+            if (nearby.includes('已售') || nearby.includes('全网') || value >= 20) return Math.round(value);
+          }
+          return 0;
+        };
+        const parseDispatchHours = (text) => {
+          const normalized = String(text || '');
+          if (/48\\s*H\\s*发货/i.test(normalized)) return 48;
+          if (/当天达|当日达/.test(normalized)) return 24;
+          if (/明天达|次日达/.test(normalized)) return 48;
+          if (/后天达/.test(normalized)) return 72;
+          const match = normalized.match(/(\\d+)\\s*天达/);
+          return match ? Number(match[1]) * 24 : 0;
+        };
+        const inferCategory = (title) => {
+          if (/套装/.test(title)) return '运动套装';
+          if (/包/.test(title)) return '运动包';
+          if (/鞋/.test(title)) return '运动鞋';
+          return '';
+        };
         const cleanTitle = (text) => String(text || '').split('\\n').map((item) => item.trim()).filter(Boolean).find((line) => {
           if (line.length < 6) return false;
           if (/^(¥|新人价|首单减|全网|\\d+件起购|退货包运费|先采后付|点此)/.test(line)) return false;
@@ -203,11 +237,17 @@ async function main() {
           const img = card.querySelector('img');
           const title = cleanTitle(card.innerText || a.innerText || a.getAttribute('title')).slice(0,300);
           const image = img ? (img.currentSrc || img.src || '') : '';
+          const text = card.innerText || '';
           if (!title || !image) return null;
           return {
             url: 'https://detail.1688.com/offer/' + id + '.html',
             title,
-            image
+            image,
+            sourceProductId: id,
+            category: inferCategory(title),
+            sourcePrice: parsePrice(text),
+            monthlySales: parseSales(text),
+            dispatchHours: parseDispatchHours(text)
           };
         }).filter(Boolean);
       })()`;
