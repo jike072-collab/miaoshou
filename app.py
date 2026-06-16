@@ -22,6 +22,7 @@ from lib.database import Database, MARKETS
 from lib.evaluation import evaluate_candidate, evaluation_status
 from lib.image_gateway import ImageGatewayError, generate
 from lib.keychain import get_secret, set_secret
+from lib.local_config import config_status, ensure_local_runtime, load_config, load_or_create_token, save_config
 from lib.prompts import PRESETS, build_prompts
 from lib.text_gateway import TextGatewayError, localize
 
@@ -29,9 +30,11 @@ from lib.text_gateway import TextGatewayError, localize
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DATA_DIR = Path(os.environ.get("WORKBENCH_DATA_DIR", str(ROOT / "data"))).resolve()
+ensure_local_runtime(DATA_DIR)
 ASSET_DIR = DATA_DIR / "assets"
 DB = Database(DATA_DIR / "workbench.db")
 AUTOMATION = AutomationEngine(DB, DATA_DIR)
+WORKBENCH_TOKEN = load_or_create_token(DATA_DIR)
 RUN_LOCK = threading.Lock()
 ACTIVE_RUNS = set()
 GENERATION_LOCK = threading.Lock()
@@ -87,10 +90,53 @@ WORKFLOW_STAGE_LABELS = {
 
 
 def initialize():
+    ensure_local_runtime(DATA_DIR)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
+    apply_config_to_settings()
     DB.migrate_products_json(DATA_DIR / "products.json")
     DB.execute("UPDATE automation_runs SET status='queued',error='服务重启后等待恢复' WHERE status IN ('running','preparing')")
     DB.execute("UPDATE generation_jobs SET status='queued',error='服务重启后等待恢复' WHERE status='running'")
+
+
+def workbench_config():
+    return load_config(DATA_DIR)
+
+
+def apply_config_to_settings(config=None):
+    config = config or workbench_config()
+    DB.set_settings({
+        "automation.cdp_port": int(config.get("chrome_debug_port") or 9222),
+        "automation.chrome_profile_dir": config.get("chrome_profile_dir") or "data/chrome-profile",
+    })
+    return config
+
+
+def local_status():
+    config = workbench_config()
+    return {
+        "ok": True,
+        "host": "127.0.0.1",
+        "dataDir": str(DATA_DIR),
+        "configPath": str(DATA_DIR / "config.json"),
+        "token": WORKBENCH_TOKEN,
+        "config": config,
+        **config_status(config),
+    }
+
+
+def workbench_token_valid(handler):
+    return handler.headers.get("X-Workbench-Token", "") == WORKBENCH_TOKEN
+
+
+def is_loopback_client(handler):
+    host = handler.client_address[0] if handler.client_address else ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
+def reject_unsafe_publish_payload(payload):
+    config = workbench_config()
+    if config.get("no_publish", True) and not bool(payload.get("dryRun", True)):
+        raise ValueError("no_publish=true：禁止创建真实发布批次，请保持演练模式")
 
 
 def json_body(handler):
@@ -1848,6 +1894,8 @@ def batch_live_publish_gate(batch, payload=None):
         return {"allowed": True, "dryRunReport": batch_report(batch), "skipDryRun": False, "blockedReasons": []}
     preview = batch_preflight(batch)
     blocked = []
+    if workbench_config().get("no_publish", True):
+        blocked.append("no_publish=true：禁止真实发布确认")
     if not preview["ready"]:
         blocked.extend(item["message"] for item in preview["risks"] if item["severity"] == "error")
     failures = unhandled_batch_failures(batch)
@@ -2393,7 +2441,7 @@ class AppHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NO_CONTENT)
         self.common_headers()
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Workbench-Token")
         self.end_headers()
 
     def do_GET(self):
@@ -2401,6 +2449,10 @@ class AppHandler(BaseHTTPRequestHandler):
         path = unquote(parsed.path)
         if path == "/api/health":
             return self.send_json({"ok": True, "service": "妙手智能选品工作台", "database": "sqlite"})
+        if path == "/api/local/status":
+            return self.send_json(local_status())
+        if path == "/api/config":
+            return self.send_json(workbench_config())
         if path == "/api/dashboard":
             candidates = DB.list_candidates()
             threshold = float(DB.setting("evaluation.threshold", 70))
@@ -2512,6 +2564,10 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.reject_cross_origin():
             return
+        if not is_loopback_client(self):
+            return self.send_json({"error": "拒绝非本机写入请求"}, HTTPStatus.FORBIDDEN)
+        if not workbench_token_valid(self):
+            return self.send_json({"error": "缺少或无效的本地 Workbench Token"}, HTTPStatus.FORBIDDEN)
         path = urlparse(self.path).path
         try:
             payload = json_body(self)
@@ -2525,6 +2581,9 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.send_json({"error": "内部错误：%s" % exc}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def route_post(self, path, payload):
+        if path == "/api/config":
+            return self.send_json(apply_config_to_settings(save_config(DATA_DIR, payload)))
+
         if path == "/api/candidates/import-links":
             raw = payload.get("urls") or []
             if isinstance(raw, str):
@@ -2748,6 +2807,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return self.send_json(preview)
 
         if path in ("/api/batches", "/api/batches/create"):
+            reject_unsafe_publish_payload(payload)
             batch, preview, error = create_batch_from_payload(payload)
             if error:
                 return self.send_json({"error": error, "preflight": preview}, HTTPStatus.BAD_REQUEST)
@@ -2797,6 +2857,9 @@ class AppHandler(BaseHTTPRequestHandler):
             api_key = values.pop("image.api_key", "")
             if api_key:
                 set_secret(api_key)
+            recipe = values.get("automation.publish_recipe")
+            if recipe is not None:
+                AUTOMATION.ensure_publish_allowed(recipe, "发布动作配方")
             allowed_prefixes = ("evaluation.", "automation.", "image.", "text.", "market.")
             DB.set_settings({key: value for key, value in values.items() if key.startswith(allowed_prefixes)})
             return self.send_json({"ok": True})
@@ -2808,6 +2871,10 @@ class AppHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         if self.reject_cross_origin():
             return
+        if not is_loopback_client(self):
+            return self.send_json({"error": "拒绝非本机写入请求"}, HTTPStatus.FORBIDDEN)
+        if not workbench_token_valid(self):
+            return self.send_json({"error": "缺少或无效的本地 Workbench Token"}, HTTPStatus.FORBIDDEN)
         path = urlparse(self.path).path
         match = re.match(r"^/api/products/([a-zA-Z0-9_-]+)$", path)
         if match and DB.delete_product(match.group(1)):

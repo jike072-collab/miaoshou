@@ -1,0 +1,16 @@
+{
+  "mode": "real",
+  "dry_run_collect": true,
+  "no_publish": true,
+  "max_items_per_run": 10,
+  "max_pages_per_keyword": 2,
+  "keywords": ["运动鞋", "透气鞋", "凉鞋", "防滑鞋"],
+  "enable_dedupe": true,
+  "enable_risk_filter": true,
+  "enable_title_clean": true,
+  "enable_image_check": true,
+  "enable_miaoshou_collect": true,
+  "max_retry": 2,
+  "chrome_profile_dir": "data/chrome-profile",
+  "chrome_debug_port": 9222
+}

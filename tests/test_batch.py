@@ -139,13 +139,22 @@ class BatchGateTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.confirm_batch(batch["id"], {"confirmation": app.batch_confirmation_phrase(batch)})
 
+        with self.assertRaisesRegex(ValueError, "no_publish=true"):
+            app.confirm_batch(batch["id"], {"confirmation": "CONFIRM 1x1 LIVE", "skipDryRun": True})
+
+    @patch("app.workbench_config", return_value={"no_publish": False})
+    def test_live_publish_accepts_explicit_skip_when_safety_allows(self, _config):
+        batch = self.insert_batch("live-batch", dry_run=False)
+        self.db.create_run("publish", ["等待人工确认"], batch_id=batch["id"], status="waiting_confirmation")
+
         with patch("app.enqueue_automation_run", return_value=True):
             result = app.confirm_batch(batch["id"], {"confirmation": "CONFIRM 1x1 LIVE", "skipDryRun": True})
 
         self.assertEqual(result["batch"]["status"], "confirmed")
         self.assertTrue(self.db.get_run(result["run"]["id"])["context"]["skipDryRun"])
 
-    def test_live_publish_accepts_matching_completed_dry_run(self):
+    @patch("app.workbench_config", return_value={"no_publish": False})
+    def test_live_publish_accepts_matching_completed_dry_run(self, _config):
         dry = self.insert_batch("dry-batch", dry_run=True, status="completed_dry_run")
         self.db.create_run("publish", ["演练完成"], batch_id=dry["id"], status="completed")
         live = self.insert_batch("live-batch", dry_run=False)

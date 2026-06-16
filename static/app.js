@@ -1,4 +1,4 @@
-const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, batchPreview: null, workflow: [], settings: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null };
+const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, batchPreview: null, workflow: [], settings: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null, localStatus: {}, workbenchToken: "" };
 const markets = { MY: "马来西亚", PH: "菲律宾", SG: "新加坡", TH: "泰国", VN: "越南" };
 const workflowTargets = {
   import_candidates: "candidates",
@@ -24,7 +24,10 @@ function notify(message, type = "success") {
 }
 
 async function api(url, options = {}) {
-  const response = await fetch(url, { headers: { "Content-Type": "application/json", ...(options.headers || {}) }, ...options });
+  const method = String(options.method || "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
+  if (method !== "GET" && state.workbenchToken) headers["X-Workbench-Token"] = state.workbenchToken;
+  const response = await fetch(url, { headers, ...options });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || `请求失败（${response.status}）`);
@@ -138,10 +141,21 @@ function renderCandidateAccess(item) {
   </div>`;
 }
 
+function renderLocalStatus(status = {}) {
+  $("#local-mode").textContent = status.mode || "real";
+  $("#local-dry-run").textContent = status.dryRunCollect ? "true" : "false";
+  $("#local-no-publish").textContent = status.noPublish ? "true" : "false";
+  $("#local-max-items").textContent = Number(status.maxItemsPerRun || 0);
+  $("#local-allow-collect").textContent = status.allowCollect ? "true" : "false";
+  $("#local-publish-forbidden").textContent = status.publishForbidden ? "true" : "false";
+}
+
 async function loadAll() {
-  const [dashboard, workflow, candidates, products, shops, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue, settings, selfcheck] = await Promise.all([
-    api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/shops"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`), api("/api/settings"), api("/api/selfcheck"),
+  const [localStatus, dashboard, workflow, candidates, products, shops, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue, settings, selfcheck] = await Promise.all([
+    api("/api/local/status"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/shops"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`), api("/api/settings"), api("/api/selfcheck"),
   ]);
+  state.localStatus = localStatus;
+  state.workbenchToken = localStatus.token || "";
   state.workflow = workflow.steps || [];
   state.candidates = candidates.items;
   state.products = products.items;
@@ -156,7 +170,8 @@ async function loadAll() {
   $("#metric-candidates").textContent = dashboard.candidates;
   $("#metric-qualified").textContent = dashboard.qualified;
   $("#metric-products").textContent = dashboard.products;
-  $("#runtime-badge").innerHTML = `<i></i> ${settings["automation.mode"] === "live" ? "真实模式" : "演练模式"}`;
+  $("#runtime-badge").innerHTML = `<i></i> ${localStatus.mode === "real" ? "真实模式" : "演练模式"}`;
+  renderLocalStatus(localStatus);
   renderWorkflow();
   renderQualifiedPool();
   renderCollectionQueue();
@@ -877,12 +892,14 @@ async function refreshRuns() {
 async function pollRuntime() {
   if (document.hidden) return;
   try {
-    const [dashboard, workflow, candidates, products, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue] = await Promise.all([
-      api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`),
+    const [localStatus, dashboard, workflow, candidates, products, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue] = await Promise.all([
+      api("/api/local/status"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`),
     ]);
     const selected = new Set(selectedCandidates());
     const selectedProducts = new Set($$("#batch-products input:checked").map((input) => input.value));
     const selectedShops = new Set($$("#batch-shops input:checked").map((input) => input.value));
+    state.localStatus = localStatus;
+    state.workbenchToken = localStatus.token || state.workbenchToken;
     state.workflow = workflow.steps || [];
     state.candidates = candidates.items;
     state.products = products.items;
@@ -895,6 +912,8 @@ async function pollRuntime() {
     $("#metric-candidates").textContent = dashboard.candidates;
     $("#metric-qualified").textContent = dashboard.qualified;
     $("#metric-products").textContent = dashboard.products;
+    $("#runtime-badge").innerHTML = `<i></i> ${localStatus.mode === "real" ? "真实模式" : "演练模式"}`;
+    renderLocalStatus(localStatus);
     renderWorkflow();
     renderQualifiedPool();
     renderCollectionQueue();

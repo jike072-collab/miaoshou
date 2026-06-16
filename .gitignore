@@ -5,5 +5,10 @@ data/assets/*
 !data/assets/.gitkeep
 data/*.db
 data/*.db-*
+data/config.json
+data/workbench.token
+data/logs/
+data/screenshots/
+data/images/
 data/chrome-profile/
 data/miaoshou-extension/

@@ -11,6 +11,8 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import ProxyHandler, build_opener, urlopen
 
+from lib.local_config import assert_publish_allowed, config_status, load_config
+
 
 COLLECT_STEPS = [
     "检查Chrome与调试端口", "检查妙手登录态", "检查1688登录与授权",
@@ -88,6 +90,24 @@ class AutomationEngine:
         except (OSError, json.JSONDecodeError, ValueError):
             return ""
 
+    def local_config(self):
+        return load_config(self.data_dir)
+
+    def chrome_profile_dir(self):
+        value = str(self.local_config().get("chrome_profile_dir") or "data/chrome-profile")
+        path = Path(value).expanduser()
+        if path.is_absolute():
+            return path
+        if path.parts and path.parts[0] == "data":
+            return self.data_dir.parent / path
+        return self.data_dir / path
+
+    def publish_guard_status(self):
+        return config_status(self.local_config())
+
+    def ensure_publish_allowed(self, recipe=None, context="发布动作"):
+        return assert_publish_allowed(self.local_config(), recipe, context)
+
     def cdp_probe(self, port):
         node_path = self.db.setting("automation.node_path", "node")
         script = Path(__file__).resolve().parent.parent / "scripts" / "cdp_probe.mjs"
@@ -147,13 +167,14 @@ class AutomationEngine:
             "chromeInstallStable": "AppTranslocation" not in str(chrome_path),
             "cdpConnected": False,
             "mode": self.db.setting("automation.mode", "dry_run"),
-            "profileDir": str(self.profile_dir),
+            "profileDir": str(self.chrome_profile_dir()),
             "pluginVerified": bool(self.db.setting("automation.plugin_verified", False)),
             "miaoshouLoginVerified": bool(self.db.setting("automation.miaoshou_login_verified", False)),
             "requiresCalibration": not bool(self.db.setting("automation.publish_recipe", [])),
             "pluginPackageReady": (plugin_dir / "manifest.json").is_file(),
             "pluginPackagePath": str(plugin_dir),
             "pluginExtensionId": plugin_id,
+            "safety": self.publish_guard_status(),
         }
         try:
             payload = json.loads(local_urlopen("http://127.0.0.1:%s/json/version" % port, timeout=1).read().decode())
@@ -183,7 +204,8 @@ class AutomationEngine:
         if not chrome_path.is_file():
             raise RuntimeError("未找到正版 Google Chrome，请先安装并在设置中填写路径")
         port = str(self.db.setting("automation.cdp_port", 9222))
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = self.chrome_profile_dir()
+        profile_dir.mkdir(parents=True, exist_ok=True)
         pages = [
             self.db.setting("automation.miaoshou_url", "https://erp.91miaoshou.com/"),
             self.db.setting("automation.alibaba_url", "https://www.1688.com/"),
@@ -193,7 +215,7 @@ class AutomationEngine:
             pages.insert(0, "chrome://extensions/")
         subprocess.Popen([
             str(chrome_path), "--remote-debugging-port=" + port,
-            "--user-data-dir=" + str(self.profile_dir),
+            "--user-data-dir=" + str(profile_dir),
             "--no-first-run", "--no-default-browser-check",
             *pages,
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -216,6 +238,8 @@ class AutomationEngine:
         )
 
     def is_dry_run(self, run):
+        if run and run.get("kind") == "collection" and self.local_config().get("dry_run_collect", True):
+            return True
         if self.db.setting("automation.mode", "dry_run") == "dry_run":
             return True
         if run and run.get("batch_id"):
@@ -238,6 +262,11 @@ class AutomationEngine:
             return self.mark_failed(run, "blocked", "Chrome未连接，请启动专用Chrome", "检查Chrome与调试端口", checks=checks)
         if run["kind"] == "publish" and checks["requiresCalibration"]:
             return self.mark_failed(run, "blocked", "发布动作配方尚未配置，请先校准妙手页面。", "检查批次完整性", checks=checks)
+        if run["kind"] == "publish":
+            try:
+                self.ensure_publish_allowed(self.db.setting("automation.publish_recipe", []), "真实发布流程")
+            except RuntimeError as exc:
+                return self.mark_failed(run, "blocked", str(exc), "no_publish 安全拦截", checks=checks)
         payload = {
             "kind": run["kind"], "port": int(self.db.setting("automation.cdp_port", 9222)),
             "miaoshouUrl": self.db.setting("automation.miaoshou_url", "https://erp.91miaoshou.com/"),
@@ -336,6 +365,11 @@ class AutomationEngine:
         )
 
     def _invoke_runner(self, run, payload):
+        if payload.get("kind") == "publish" and payload.get("phase") == "confirm":
+            try:
+                self.ensure_publish_allowed(payload.get("recipe") or [], "最终发布确认")
+            except RuntimeError as exc:
+                return self.mark_failed(run, "blocked", str(exc), "no_publish 安全拦截")
         node_path = self.db.setting("automation.node_path", "node")
         script = Path(__file__).resolve().parent.parent / "scripts" / "cdp_runner.mjs"
         try:
@@ -391,6 +425,8 @@ class AutomationEngine:
         run = self.db.get_run(run_id)
         if not run or run["kind"] != "publish":
             raise RuntimeError("发布任务不存在")
+        if self.local_config().get("no_publish", True) and not self.is_dry_run(run):
+            return self.mark_failed(run, "blocked", "no_publish=true：真实发布确认已被安全开关拦截", "no_publish 安全拦截")
         if self.is_dry_run(run):
             steps = []
             for item in run["steps"]:

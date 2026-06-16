@@ -453,6 +453,31 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 }
 .metric-grid span { color: var(--muted); font-size: 10px; font-weight: 700; }
 .metric-grid strong { display: block; margin-top: 8px; font-size: 30px; letter-spacing: -.04em; }
+.local-safety-strip {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 0 0 18px;
+}
+.local-safety-strip article {
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255,255,255,.86);
+  box-shadow: 0 8px 20px rgba(24,33,28,.04);
+}
+.local-safety-strip span {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+}
+.local-safety-strip strong {
+  display: block;
+  margin-top: 5px;
+  font-size: 18px;
+}
+.local-safety-strip .danger strong { color: var(--danger); }
 .workflow-overview {
   margin: 0 0 18px;
   border: 1px solid var(--line);
@@ -1406,6 +1431,7 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 @media (max-width: 1050px) {
   .dashboard-hero { grid-template-columns: 1fr; }
   .metric-grid { grid-template-columns: repeat(3, 1fr); }
+  .local-safety-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .qualified-item { grid-template-columns: 1fr; }
   .pool-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .workflow-steps { grid-template-columns: repeat(2, minmax(150px, 1fr)); }
@@ -1423,6 +1449,7 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 
 @media (max-width: 760px) {
   .dashboard-hero { padding-top: 40px; }
+  .local-safety-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
   .qualified-pool { padding: 0 16px 16px; }
   .image-workbench-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .image-workbench-metrics article:nth-child(3n) { border-right: 1px solid var(--line); }
@@ -1464,6 +1491,7 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 /* Final workbench polish */
 @media (max-width: 1050px) {
   .dashboard-hero { grid-template-columns: 1fr; gap: 18px; }
+  .local-safety-strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .action-grid, .publish-grid { grid-template-columns: 1fr; }
 }
 
@@ -1475,6 +1503,9 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
   .metric-grid { grid-template-columns: repeat(3, 1fr); gap: 8px; }
   .metric-grid article { padding: 14px 12px; border-radius: 12px; }
   .metric-grid strong { font-size: 24px; }
+  .local-safety-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .local-safety-strip article { padding: 10px 11px; }
+  .local-safety-strip strong { font-size: 16px; }
   .workflow-overview { margin-bottom: 14px; }
   .module-tabs { top: 62px; border-radius: 12px; }
   .panel { padding: 18px; }
