@@ -85,6 +85,7 @@ class RealMiaoshouAdapterTest(unittest.TestCase):
             "local_images": ["/tmp/a.jpg", "/tmp/b.jpg", "/tmp/c.jpg"],
             "image_status": "image_ready",
             "sku_complete": True,
+            "dedupe_checked_at": 1,
             "precheck_status": "precheck_passed",
             "precheck_reason": "通过预检",
         })
@@ -122,6 +123,12 @@ class RealMiaoshouAdapterTest(unittest.TestCase):
 
     def test_collect_blocks_dangerous_safe_recipe(self):
         candidate = self.ready_candidate()
+        self.browser.pages = [{
+            "url": "https://erp.91miaoshou.com/home",
+            "title": "妙手",
+            "text": "首页\n产品\n订单\n采集箱\n加入采集箱\n保存草稿",
+        }]
+        self.browser.engine.pages = self.browser.pages
         self.db.set_settings({"automation.miaoshou_box_recipe": [{"type": "clickText", "text": "确认发布"}]})
         run = self.adapter.create_run(candidate, status="running")
 
@@ -133,6 +140,12 @@ class RealMiaoshouAdapterTest(unittest.TestCase):
 
     def test_collect_success_writes_collection_box_record(self):
         candidate = self.ready_candidate()
+        self.browser.pages = [{
+            "url": "https://erp.91miaoshou.com/home",
+            "title": "妙手",
+            "text": "首页\n产品\n订单\n采集箱\n加入采集箱\n保存草稿",
+        }]
+        self.browser.engine.pages = self.browser.pages
         self.db.set_settings({"automation.miaoshou_box_recipe": [{"type": "clickText", "text": "加入采集箱"}]})
         run = self.adapter.create_run(candidate, status="running", context={"markets": ["MY"]})
 
@@ -147,8 +160,19 @@ class RealMiaoshouAdapterTest(unittest.TestCase):
         self.assertEqual(records[0]["images_used"], ["/tmp/a.jpg", "/tmp/b.jpg", "/tmp/c.jpg"])
         self.assertEqual(refreshed["status"], "collected_to_box")
         self.assertTrue(refreshed["collected_at"])
-        self.assertTrue(result["diagnostics"]["dangerousText"])
-        self.assertIn("发布", result["diagnostics"]["dangerousText"][0])
+        self.assertEqual(result["diagnostics"]["dangerousText"], [])
+
+    def test_collect_pauses_when_page_contains_publish_buttons(self):
+        candidate = self.ready_candidate()
+        self.db.set_settings({"automation.miaoshou_box_recipe": [{"type": "clickText", "text": "加入采集箱"}]})
+        run = self.adapter.create_run(candidate, status="running", context={"markets": ["MY"]})
+
+        result = self.adapter.collect_candidate(candidate, run=run)
+
+        self.assertEqual(result["status"], "waiting_for_manual")
+        self.assertEqual(result["diagnostics"]["failedStep"], "扫描危险发布按钮")
+        self.assertIn("危险按钮", result["error"])
+        self.assertIn("最终发布", result["diagnostics"]["dangerousText"])
 
     def test_collect_ready_reports_blocked_candidates(self):
         candidate = self.ready_candidate()

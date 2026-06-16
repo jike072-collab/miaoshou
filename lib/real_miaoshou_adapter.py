@@ -112,6 +112,8 @@ class RealMiaoshouAdapter:
             reasons.append("必须开启 dry_run_collect 或 collect_to_box_only")
         if not config.get("enable_miaoshou_collect", True):
             reasons.append("enable_miaoshou_collect 未开启")
+        if not candidate.get("dedupe_checked_at"):
+            reasons.append("候选商品尚未完成去重检查")
         if (candidate.get("dedupe_status") or "new_candidate") != "new_candidate":
             reasons.append("重复候选已跳过：%s" % (candidate.get("dedupe_reason") or candidate.get("dedupe_status") or "重复"))
         if (candidate.get("precheck_status") or "") != "precheck_passed":
@@ -303,6 +305,12 @@ class RealMiaoshouAdapter:
 
         clickable_text = visible_text_summary(pages)
         dangerous = detect_dangerous_texts(clickable_text)
+        if dangerous:
+            screenshot = self.screenshot_safely()
+            message = "页面存在发布/上架/提交类危险按钮，默认暂停并保持不点击"
+            diagnostics = self.diagnostics(message, "扫描危险发布按钮", pages, screenshot, result, dangerous)
+            self.update_candidate(candidate.get("id"), "waiting_for_manual")
+            return self.mark_run(run, "waiting_for_manual", "扫描危险发布按钮", message, diagnostics, screenshot)
         safe_text = " ".join(list(SAFE_COLLECTION_TEXTS))
         try:
             assert_safe_collection_action(config, safe_text, "妙手页面可点击文本")

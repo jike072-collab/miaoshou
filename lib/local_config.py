@@ -26,6 +26,8 @@ DEFAULT_CONFIG = {
     "chrome_debug_port": 9222,
 }
 
+MAX_SAFE_ITEMS_PER_RUN = 10
+MAX_SAFE_PAGES_PER_KEYWORD = 2
 LOCAL_DIRS = ("logs", "screenshots", "images", "chrome-profile")
 PUBLISH_ACTION_PATTERN = re.compile(
     r"(publish|submit|final\s*publish|confirm\s*publish|发布|上架|提交|最终发布|立即发布|确认发布)",
@@ -85,8 +87,8 @@ def sanitize_config(values):
             else:
                 merged[key] = str(value or "")
     merged["mode"] = "mock" if str(merged.get("mode")).lower() == "mock" else "real"
-    merged["max_items_per_run"] = min(max(1, int(merged["max_items_per_run"])), 50)
-    merged["max_pages_per_keyword"] = min(max(1, int(merged["max_pages_per_keyword"])), 10)
+    merged["max_items_per_run"] = min(max(1, int(merged["max_items_per_run"])), MAX_SAFE_ITEMS_PER_RUN)
+    merged["max_pages_per_keyword"] = min(max(1, int(merged["max_pages_per_keyword"])), MAX_SAFE_PAGES_PER_KEYWORD)
     merged["max_retry"] = min(max(0, int(merged["max_retry"])), 5)
     return merged
 
@@ -174,4 +176,16 @@ def assert_safe_collection_action(config, action_text, context="采集动作"):
         raise RuntimeError("%s 需要 no_publish=true 安全开关" % (context or "采集动作"))
     if contains_publish_text(action_text):
         raise RuntimeError("%s 包含危险发布动作，已被 no_publish=true 安全开关拦截" % (context or "采集动作"))
+    return True
+
+
+def assert_real_pipeline_safety(config, context="真实小批量联调"):
+    if not config.get("no_publish", True):
+        raise RuntimeError("%s 需要 no_publish=true，禁止进入任何可能发布的流程" % context)
+    if not (config.get("dry_run_collect", True) or config.get("collect_to_box_only", False)):
+        raise RuntimeError("%s 需要 dry_run_collect=true 或 collect_to_box_only=true" % context)
+    if int(config.get("max_items_per_run") or 0) > MAX_SAFE_ITEMS_PER_RUN:
+        raise RuntimeError("%s 每轮最多 %d 个商品" % (context, MAX_SAFE_ITEMS_PER_RUN))
+    if int(config.get("max_pages_per_keyword") or 0) > MAX_SAFE_PAGES_PER_KEYWORD:
+        raise RuntimeError("%s 每个关键词最多 %d 页" % (context, MAX_SAFE_PAGES_PER_KEYWORD))
     return True

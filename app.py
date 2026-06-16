@@ -25,7 +25,7 @@ from lib.evaluation import evaluate_candidate, evaluation_status
 from lib.image_inspector import analyze_candidate_images, make_image_record_payload
 from lib.image_gateway import ImageGatewayError, generate
 from lib.keychain import get_secret, set_secret
-from lib.local_config import config_status, ensure_local_runtime, load_config, load_or_create_token, save_config
+from lib.local_config import assert_real_pipeline_safety, config_status, ensure_local_runtime, load_config, load_or_create_token, save_config
 from lib.prompts import PRESETS, build_prompts
 from lib.real1688_adapter import Real1688Adapter, SOURCING_ACTIVE_STATUSES
 from lib.real_miaoshou_adapter import RealMiaoshouAdapter
@@ -324,7 +324,9 @@ def image_fingerprint(value):
         return ""
     parsed = urlparse(value)
     host = (parsed.hostname or "").lower()
-    path = re.sub(r"_(?:\d+x\d+|sum|!!.*)$", "", parsed.path or "")
+    path = parsed.path or ""
+    path = re.sub(r"_(?:\d+x\d+|sum|!!.*)$", "", path)
+    path = re.sub(r"[-_]\d+x\d+(?=\.[A-Za-z0-9]+$|$)", "", path)
     return "%s%s" % (host, path)
 
 
@@ -2787,6 +2789,26 @@ def pipeline_default_context():
     }
 
 
+def real_pipeline_environment_status():
+    browser = BROWSER.platform_status()
+    sourcing_status = SOURCING.current()
+    safety = config_status(workbench_config())
+    return {
+        "chromeReady": bool(browser.get("chrome_ready")),
+        "cdpReady": bool(browser.get("cdp_ready")),
+        "alibabaLoggedIn": bool(browser.get("alibaba_logged_in")),
+        "miaoshouLoggedIn": bool(browser.get("miaoshou_logged_in")),
+        "verificationRequired": bool(browser.get("verification_required")),
+        "waitingForManual": bool(browser.get("waiting_for_manual")),
+        "manualMessage": browser.get("manual_message") or "",
+        "currentUrl": browser.get("current_url") or "",
+        "sourcingStatus": (sourcing_status or {}).get("status") or "idle",
+        "safety": safety,
+        "allowCollect": bool(safety.get("allowCollect")),
+        "publishForbidden": bool(safety.get("publishForbidden")),
+    }
+
+
 def pipeline_steps_payload(current_key="search", completed_keys=None, failed_key=""):
     completed_keys = set(completed_keys or [])
     payload = []
@@ -2924,7 +2946,10 @@ def candidates_for_pipeline():
 
 def pipeline_process_candidates(run_id, only_failed=False):
     processed = 0
+    limit = max(1, int(workbench_config().get("max_items_per_run") or 10))
     for candidate in candidates_for_pipeline():
+        if processed >= limit:
+            break
         if pipeline_should_stop(run_id) or pipeline_should_pause(run_id):
             break
         candidate = DB.get_candidate(candidate["id"])
@@ -3007,13 +3032,28 @@ def pipeline_process_candidates(run_id, only_failed=False):
         else:
             blocked = collect_result.get("blocked") or []
             diagnostics = (blocked[0].get("diagnostics") if blocked else {}) or {}
+            blocked_error = blocked[0].get("error") if blocked else ""
+            if any(term in (blocked_error or "") for term in ("登录", "验证码", "短信", "人机", "验证")):
+                DB.update_run(run_id, status="waiting_for_manual", current_step="等待人工处理", error=blocked_error or "妙手需要人工处理")
+                pipeline_log(
+                    DB.get_run(run_id),
+                    "等待人工处理",
+                    "waiting_for_manual",
+                    blocked_error or "妙手需要人工处理",
+                    candidate,
+                    error=blocked_error or "",
+                    screenshot=diagnostics.get("screenshot") or "",
+                    current_url=diagnostics.get("currentUrl") or "",
+                    details=collect_result,
+                )
+                break
             pipeline_log(
                 DB.get_run(run_id),
                 "妙手采集",
                 "failed" if blocked else "blocked",
                 "妙手采集箱流程未完成",
                 candidate,
-                error=(blocked[0].get("error") if blocked else "无合格候选进入采集箱"),
+                error=blocked_error or "无合格候选进入采集箱",
                 screenshot=diagnostics.get("screenshot") or "",
                 current_url=diagnostics.get("currentUrl") or "",
                 details=collect_result,
@@ -3029,8 +3069,27 @@ def execute_pipeline_run(run_id, retry_failed=False):
             ACTIVE_PIPELINE_RUNS.discard(run_id)
         return
     try:
+        config = workbench_config()
+        assert_real_pipeline_safety(config, "真实全流程小批量联调")
         DB.update_run(run_id, status="running", error="", resolution="")
         save_pipeline_context(run_id, requestedPause=False, requestedStop=False)
+        env = real_pipeline_environment_status()
+        if not env["chromeReady"] or not env["cdpReady"]:
+            DB.update_run(run_id, status="waiting_for_manual", current_step="等待人工处理", error="Chrome/CDP 未就绪，请先启动专用 Chrome")
+            pipeline_log(DB.get_run(run_id), "等待人工处理", "waiting_for_manual", "Chrome/CDP 未就绪，请先启动专用 Chrome", details=env)
+            return
+        if env["verificationRequired"] or env["waitingForManual"]:
+            DB.update_run(run_id, status="waiting_for_manual", current_step="等待人工处理", error=env["manualMessage"] or "检测到验证码或登录验证")
+            pipeline_log(DB.get_run(run_id), "等待人工处理", "waiting_for_manual", env["manualMessage"] or "检测到验证码或登录验证", details=env)
+            return
+        if not env["alibabaLoggedIn"]:
+            DB.update_run(run_id, status="waiting_for_manual", current_step="等待人工处理", error="1688 未登录")
+            pipeline_log(DB.get_run(run_id), "等待人工处理", "waiting_for_manual", "1688 未登录，请先手动登录", details=env)
+            return
+        if not env["miaoshouLoggedIn"]:
+            DB.update_run(run_id, status="waiting_for_manual", current_step="等待人工处理", error="妙手未登录")
+            pipeline_log(DB.get_run(run_id), "等待人工处理", "waiting_for_manual", "妙手未登录，请先手动登录", details=env)
+            return
         pipeline_update_step(run_id, "search", message="启动真实 1688 搜索找品")
         if not retry_failed:
             sourcing_run = SOURCING.start_run()
