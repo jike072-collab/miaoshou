@@ -140,6 +140,7 @@
         <div class="table-toolbar">
           <div><p class="eyebrow">CANDIDATE POOL</p><h2>候选商品与五国评分</h2></div>
           <div class="toolbar-actions">
+            <button id="dedupe-candidates" class="button outline" type="button">去重检查</button>
             <button id="bulk-check-candidates" class="button outline" type="button">批量检查数据</button>
             <button id="refresh-selected" class="button outline" type="button">从来源补全选中</button>
             <button id="evaluate-selected" class="button outline" type="button">批量进入评分</button>
@@ -151,6 +152,7 @@
         <div class="candidate-queue-bar">
           <button class="candidate-queue-tab active" data-candidate-queue="need_data" type="button"><span>待补数据</span><strong id="queue-need-data">0</strong></button>
           <button class="candidate-queue-tab" data-candidate-queue="ready_to_score" type="button"><span>可评分</span><strong id="queue-ready-score">0</strong></button>
+          <button class="candidate-queue-tab" data-candidate-queue="duplicate_skipped" type="button"><span>重复跳过</span><strong id="queue-duplicate-skipped">0</strong></button>
           <button class="candidate-queue-tab" data-candidate-queue="all" type="button"><span>全部候选</span><strong id="queue-all">0</strong></button>
         </div>
         <div class="table-scroll">

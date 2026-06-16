@@ -43,6 +43,24 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual(updated["search_page"], 1)
         self.assertEqual(updated["search_rank"], 8)
 
+    def test_collection_box_record_round_trip(self):
+        candidate = self.db.import_candidates(["https://detail.1688.com/offer/123456.html"])[0]
+        record = self.db.save_collection_box_record({
+            "candidate_id": candidate["id"],
+            "offer_id": "123456",
+            "source_url": candidate["source_url"],
+            "clean_title": "透气运动鞋",
+            "image_status": "approved",
+            "miaoshou_status": "采集箱",
+            "run_id": "run-1",
+        })
+
+        records = self.db.list_collection_box_records()
+        self.assertEqual(record["candidate_id"], candidate["id"])
+        self.assertEqual(record["offer_id"], "123456")
+        self.assertEqual(record["miaoshou_status"], "采集箱")
+        self.assertEqual(records[0]["id"], record["id"])
+
     def test_product_round_trip(self):
         product = self.db.save_product({
             "title": "运动鞋", "sourceUrl": "https://example.com/p",

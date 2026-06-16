@@ -31,6 +31,7 @@ class Real1688Adapter:
         self.db = database
         self.data_dir = Path(data_dir)
         self.browser = browser_manager
+        self.dedupe_callback = None
 
     def config(self):
         return load_config(self.data_dir)
@@ -261,7 +262,11 @@ class Real1688Adapter:
                     "status": "待评估",
                 }
                 self.db.update_candidate(candidate["id"], updates)
-                if existing:
+                duplicate_after_dedupe = False
+                if self.dedupe_callback:
+                    dedupe = self.dedupe_callback([candidate["id"]])
+                    duplicate_after_dedupe = bool((dedupe.get("items") or [{}])[0].get("duplicateSkipped"))
+                if existing or duplicate_after_dedupe:
                     skipped += 1
                 else:
                     saved += 1

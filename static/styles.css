@@ -775,7 +775,7 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 .compact-toolbar { padding-bottom: 16px; }
 .candidate-queue-bar {
   display: grid;
-  grid-template-columns: repeat(3, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: 8px;
   padding: 12px 18px;
   border-bottom: 1px solid var(--line);
@@ -919,6 +919,11 @@ dialog::backdrop { background: rgba(7, 15, 10, 0.7); backdrop-filter: blur(5px);
 .candidate-access .ok { color: #236847; background: #e8f5ec; }
 .candidate-access .bad { color: #8a3f1c; background: #fff1e8; }
 .candidate-access small { color: var(--muted); font-size: 9px; }
+.candidate-access .dedupe-line {
+  color: #786c55;
+  font-weight: 800;
+  line-height: 1.45;
+}
 .missing-hints {
   display: flex;
   flex-wrap: wrap;

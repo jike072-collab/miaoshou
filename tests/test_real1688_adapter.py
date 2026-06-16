@@ -117,6 +117,21 @@ class Real1688AdapterTest(unittest.TestCase):
         self.assertEqual((saved, skipped, failed), (0, 1, 0))
         self.assertEqual(len(self.db.list_candidates()), 1)
 
+    def test_save_results_counts_dedupe_callback_skip(self):
+        item = {
+            "title": "夏季透气运动鞋",
+            "url": "https://detail.1688.com/offer/123456.html",
+            "offer_id": "123456",
+            "main_image_url": "https://cbu01.alicdn.com/img/test.jpg",
+            "price": 29.8,
+        }
+        self.adapter.dedupe_callback = lambda ids: {"items": [{"duplicateSkipped": True}]}
+
+        saved, skipped, failed = self.adapter.save_results([item], "运动鞋")
+
+        self.assertEqual((saved, skipped, failed), (0, 1, 0))
+        self.assertEqual(len(self.db.list_candidates()), 1)
+
     def test_run_once_pauses_when_platform_requires_manual(self):
         run = self.adapter.start_run()
         with patch.object(self.adapter, "ensure_alibaba_ready", side_effect=Exception("boom")):

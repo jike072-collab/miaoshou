@@ -100,6 +100,7 @@ function candidateQueueCounts() {
     all: state.candidates.length,
     need_data: state.candidates.filter((item) => item.queue === "need_data").length,
     ready_to_score: state.candidates.filter((item) => item.queue === "ready_to_score").length,
+    duplicate_skipped: state.candidates.filter((item) => item.queue === "duplicate_skipped").length,
   };
 }
 
@@ -112,6 +113,7 @@ function renderCandidateQueues() {
   const counts = candidateQueueCounts();
   $("#queue-need-data").textContent = counts.need_data;
   $("#queue-ready-score").textContent = counts.ready_to_score;
+  $("#queue-duplicate-skipped").textContent = counts.duplicate_skipped;
   $("#queue-all").textContent = counts.all;
   $$(".candidate-queue-tab").forEach((button) => button.classList.toggle("active", button.dataset.candidateQueue === state.candidateQueue));
 }
@@ -138,6 +140,7 @@ function renderCandidateAccess(item) {
     <span class="${item.isReadyToScore ? "ok" : "bad"}">可评分：${item.isReadyToScore ? "是" : "否"}</span>
     <span class="${item.canCollect ? "ok" : "bad"}">可采集：${item.canCollect ? "是" : "否"}</span>
     <small>缺失 ${Number(item.missingFieldCount || 0)} 项</small>
+    ${item.duplicateSkipped ? `<small class="dedupe-line">${esc(item.dedupeStatusLabel || "重复跳过")}：${esc(item.dedupeReason || "重复候选")}</small>` : `<small class="dedupe-line">去重：${esc(item.dedupeStatusLabel || "新候选")}</small>`}
   </div>`;
 }
 
@@ -1061,6 +1064,15 @@ $("#create-search").addEventListener("click", async () => {
     $("#search-result").innerHTML = `已创建任务。<a href="${esc(data.searchUrl)}" target="_blank">打开1688搜索页</a>`;
     notify("关键词找品任务已创建");
     await refreshRuns();
+  } catch (error) { notify(error.message, "error"); }
+});
+
+$("#dedupe-candidates").addEventListener("click", async () => {
+  try {
+    const ids = selectedCandidates();
+    const data = await api("/api/candidates/dedupe", { method: "POST", body: JSON.stringify({ candidateIds: ids }) });
+    notify(`去重完成：${data.skipped.length} 个重复跳过`);
+    await loadAll();
   } catch (error) { notify(error.message, "error"); }
 });
 

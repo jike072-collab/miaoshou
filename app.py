@@ -11,6 +11,7 @@ import re
 import threading
 import time
 import uuid
+from difflib import SequenceMatcher
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -73,6 +74,25 @@ COLLECTION_QUEUE_DEFINITIONS = [
     ("manual", "需人工处理"),
 ]
 
+DEDUPE_STATUS_LABELS = {
+    "new_candidate": "新候选",
+    "duplicate_offer_id": "Offer ID重复",
+    "duplicate_url": "链接重复",
+    "duplicate_title": "标题重复",
+    "duplicate_image": "主图重复",
+    "already_collected_to_box": "已进入采集箱",
+    "needs_manual_duplicate_check": "疑似重复",
+}
+
+DEDUPE_SKIP_STATUSES = {
+    "duplicate_offer_id",
+    "duplicate_url",
+    "duplicate_title",
+    "duplicate_image",
+    "already_collected_to_box",
+    "needs_manual_duplicate_check",
+}
+
 REJECTION_REASONS = ["鞋子变形", "颜色不一致", "文字错误", "Logo 错误", "背景杂乱", "主体不清晰", "风格不符合平台", "其他"]
 
 WORKFLOW_STAGE_LABELS = {
@@ -97,6 +117,7 @@ WORKFLOW_STAGE_LABELS = {
 
 def initialize():
     ensure_local_runtime(DATA_DIR)
+    SOURCING.dedupe_callback = lambda candidate_ids: dedupe_candidates(candidate_ids)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
     apply_config_to_settings()
     DB.migrate_products_json(DATA_DIR / "products.json")
@@ -186,6 +207,56 @@ def normalize_url(value):
     return value
 
 
+def normalize_source_url_for_dedupe(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower().removeprefix("www.")
+    path = re.sub(r"/+$", "", parsed.path or "")
+    offer_id = source_product_id(value)
+    if offer_id:
+        return "1688:%s" % offer_id
+    return "%s%s" % (host, path)
+
+
+def clean_title_for_dedupe(title):
+    text = str(title or "").lower()
+    text = re.sub(r"[\s\-_/|,，.。:：;；!！?？()（）【】\\[\\]{}<>《》\"'“”‘’]+", "", text)
+    noise = (
+        "厂家直销", "跨境", "一件代发", "现货", "批发", "包邮", "新款", "爆款",
+        "源头工厂", "支持代发", "1688", "淘宝", "天猫", "抖音",
+    )
+    for marker in noise:
+        text = text.replace(marker, "")
+    return text[:120]
+
+
+def image_fingerprint(value):
+    value = str(value or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    host = (parsed.hostname or "").lower()
+    path = re.sub(r"_(?:\d+x\d+|sum|!!.*)$", "", parsed.path or "")
+    return "%s%s" % (host, path)
+
+
+def primary_candidate_image(candidate):
+    images = candidate.get("images") or []
+    if images:
+        return images[0]
+    return candidate.get("main_image_url") or ""
+
+
+def candidate_dedupe_status(candidate):
+    return str((candidate or {}).get("dedupe_status") or "new_candidate")
+
+
+def candidate_is_duplicate_skipped(candidate):
+    return candidate_dedupe_status(candidate) in DEDUPE_SKIP_STATUSES
+
+
 def encode_1688_keyword(keyword):
     try:
         return quote(keyword.encode("gbk"))
@@ -229,6 +300,13 @@ def candidate_summary(candidate):
     evaluations = candidate.get("evaluations") or []
     threshold = float(DB.setting("evaluation.threshold", 70))
     confidence = float(DB.setting("evaluation.min_confidence", 70))
+    dedupe_status = candidate_dedupe_status(candidate)
+    dedupe_reasons = candidate.get("dedupe_reasons") or []
+    candidate["dedupeStatus"] = dedupe_status
+    candidate["dedupeStatusLabel"] = DEDUPE_STATUS_LABELS.get(dedupe_status, dedupe_status)
+    candidate["dedupeReason"] = candidate.get("dedupe_reason") or ""
+    candidate["dedupeReasons"] = dedupe_reasons
+    candidate["duplicateSkipped"] = candidate_is_duplicate_skipped(candidate)
     candidate["marketSummary"] = candidate_market_summary(candidate)
     candidate["qualifiedMarkets"] = [
         item["market"] for item in evaluations
@@ -241,7 +319,7 @@ def candidate_summary(candidate):
     candidate["missingFieldCount"] = len(candidate["missingFields"])
     candidate["nextAction"] = candidate["dataCompleteness"]["nextAction"]
     candidate["isReadyToScore"] = candidate["dataCompleteness"]["readyToScore"]
-    candidate["canCollect"] = bool(candidate["qualifiedMarkets"]) and candidate["isReadyToScore"] and not candidate_is_skipped(candidate)
+    candidate["canCollect"] = bool(candidate["qualifiedMarkets"]) and candidate["isReadyToScore"] and not candidate_is_skipped(candidate) and not candidate["duplicateSkipped"]
     candidate["queue"] = candidate_queue(candidate)
     candidate["workflowStatus"] = get_candidate_workflow_status(candidate)
     return candidate
@@ -261,6 +339,8 @@ def workflow_status(stage, blocked=False, failed=False, next_action="", detail="
 def get_candidate_workflow_status(candidate):
     if not candidate:
         return workflow_status("candidate_imported", blocked=True, failed=True, detail="候选不存在")
+    if candidate_is_duplicate_skipped(candidate):
+        return workflow_status("failure_handling", blocked=True, failed=True, next_action="查看重复原因", detail=candidate.get("dedupe_reason") or "重复候选已跳过")
     if candidate_is_skipped(candidate):
         return workflow_status("failure_handling", blocked=True, failed=True, next_action="恢复或删除候选", detail="候选已跳过")
     completeness = candidate.get("dataCompleteness") or candidate_data_completeness(candidate)
@@ -416,7 +496,7 @@ def candidate_data_completeness(candidate):
         "requiredMissingFields": [item["field"] for item in required_missing],
         "requiredMissingHints": required_missing,
         "missingRequiredCount": len(required_missing),
-        "readyToScore": len(required_missing) == 0 and not candidate_is_skipped(candidate),
+        "readyToScore": len(required_missing) == 0 and not candidate_is_skipped(candidate) and not candidate_is_duplicate_skipped(candidate),
         "marketDataComplete": market_complete,
         "marketMissingFields": market_missing,
         "nextAction": next_action,
@@ -443,6 +523,8 @@ def candidate_market_data_status(candidate):
 
 
 def candidate_queue(candidate):
+    if candidate_is_duplicate_skipped(candidate):
+        return "duplicate_skipped"
     if candidate_is_skipped(candidate):
         return "skipped"
     return "ready_to_score" if candidate.get("dataCompleteness", {}).get("readyToScore") else "need_data"
@@ -458,6 +540,10 @@ def filter_candidates_by_status(candidates, status):
         return [item for item in summaries if item["queue"] == "ready_to_score"]
     if status == "skipped":
         return [item for item in summaries if item["queue"] == "skipped"]
+    if status == "new_candidate":
+        return [item for item in summaries if item["dedupeStatus"] == "new_candidate"]
+    if status == "duplicate_skipped":
+        return [item for item in summaries if item["queue"] == "duplicate_skipped"]
     return summaries
 
 
@@ -473,6 +559,7 @@ def run_ids_from_payload(payload):
 
 def bulk_check_candidates(candidate_ids):
     ids = candidate_ids or [item["id"] for item in DB.list_candidates()]
+    dedupe_candidates(ids)
     checked, need_data, ready_to_score, missing = [], [], [], []
     for candidate_id in ids:
         item = DB.get_candidate(candidate_id)
@@ -483,7 +570,7 @@ def bulk_check_candidates(candidate_ids):
         checked.append(summary)
         if summary["isReadyToScore"]:
             ready_to_score.append(summary["id"])
-        elif not candidate_is_skipped(summary):
+        elif not candidate_is_skipped(summary) and not candidate_is_duplicate_skipped(summary):
             need_data.append(summary["id"])
     return {
         "checked": len(checked),
@@ -516,6 +603,224 @@ def bulk_delete_candidates(candidate_ids):
     return {"deleted": deleted, "missing": missing}
 
 
+def history_dedupe_indexes():
+    candidates = [candidate_summary(item) for item in DB.list_candidates()]
+    products = DB.list_products()
+    collection_box_records = DB.list_collection_box_records() if hasattr(DB, "list_collection_box_records") else []
+    runs = DB.list_runs()
+    def bucket(items, key_func):
+        result = {}
+        for item in items:
+            key = key_func(item)
+            if key:
+                result.setdefault(key, []).append(item)
+        return result
+    return {
+        "candidate_by_offer": bucket(candidates, lambda item: str(item.get("source_product_id") or "").strip()),
+        "candidate_by_url": bucket(candidates, lambda item: normalize_source_url_for_dedupe(item.get("source_url"))),
+        "candidate_by_title": bucket(candidates, lambda item: clean_title_for_dedupe(item.get("title"))),
+        "candidate_by_image": bucket(candidates, lambda item: image_fingerprint(primary_candidate_image(item))),
+        "product_by_offer": {
+            str(item.get("sourceProductId") or ""): item
+            for item in products
+            if str(item.get("sourceProductId") or "").strip()
+        },
+        "product_by_url": {
+            normalize_source_url_for_dedupe(item.get("sourceUrl")): item
+            for item in products
+            if normalize_source_url_for_dedupe(item.get("sourceUrl"))
+        },
+        "product_by_title": {
+            clean_title_for_dedupe(item.get("title")): item
+            for item in products
+            if clean_title_for_dedupe(item.get("title"))
+        },
+        "product_by_image": {
+            image_fingerprint(item.get("mainImage") or (item.get("images") or [""])[0]): item
+            for item in products
+            if image_fingerprint(item.get("mainImage") or (item.get("images") or [""])[0])
+        },
+        "box_by_offer": {
+            str(item.get("offer_id") or ""): item
+            for item in collection_box_records
+            if str(item.get("offer_id") or "").strip()
+        },
+        "box_by_url": {
+            normalize_source_url_for_dedupe(item.get("source_url")): item
+            for item in collection_box_records
+            if normalize_source_url_for_dedupe(item.get("source_url"))
+        },
+        "box_by_title": {
+            clean_title_for_dedupe(item.get("clean_title")): item
+            for item in collection_box_records
+            if clean_title_for_dedupe(item.get("clean_title"))
+        },
+        "box_by_image": {
+            image_fingerprint(item.get("image_status")): item
+            for item in collection_box_records
+            if image_fingerprint(item.get("image_status"))
+        },
+        "run_by_url": {
+            normalize_source_url_for_dedupe((run.get("context") or {}).get("url") or run.get("context", {}).get("sourceUrl") or ""): run
+            for run in runs
+            if run.get("kind") in ("collection", "keyword_search")
+            and normalize_source_url_for_dedupe((run.get("context") or {}).get("url") or run.get("context", {}).get("sourceUrl") or "")
+        },
+        "run_by_offer": {
+            str((run.get("context") or {}).get("sourceProductId") or run.get("candidate_id") or ""): run
+            for run in runs
+            if run.get("kind") in ("collection", "keyword_search")
+            and str((run.get("context") or {}).get("sourceProductId") or run.get("candidate_id") or "").strip()
+        },
+    }
+
+
+def analyze_candidate_dedupe(candidate, indexes=None):
+    indexes = indexes or history_dedupe_indexes()
+    reasons = []
+    details = []
+    candidate_id = candidate.get("id") or ""
+    source_url = candidate.get("source_url") or ""
+    offer_id = str(candidate.get("source_product_id") or "").strip()
+    title_key = clean_title_for_dedupe(candidate.get("title"))
+    image_key = image_fingerprint(primary_candidate_image(candidate))
+    url_key = normalize_source_url_for_dedupe(source_url)
+    def other_candidate(index, key):
+        value = index.get(key) if key else None
+        if isinstance(value, list):
+            return next((item for item in value if item.get("id") != candidate_id), None)
+        return value if value and value.get("id") != candidate_id else None
+    def similar_title(index):
+        if not title_key or len(title_key) < 8:
+            return None
+        for key, value in index.items():
+            if not key or key == title_key:
+                continue
+            items = value if isinstance(value, list) else [value]
+            item = next((row for row in items if row and row.get("id") != candidate_id), None)
+            if not item:
+                continue
+            ratio = SequenceMatcher(None, title_key, key).ratio()
+            overlap = title_key in key or key in title_key
+            if ratio >= 0.92 or (overlap and min(len(title_key), len(key)) / max(len(title_key), len(key)) >= 0.8):
+                return item
+        return None
+    if offer_id and other_candidate(indexes["candidate_by_offer"], offer_id):
+        reasons.append("duplicate_offer_id")
+        details.append("已存在同 offer_id 候选")
+    elif offer_id and offer_id in indexes["product_by_offer"]:
+        reasons.append("duplicate_offer_id")
+        details.append("已存在同 offer_id 正式商品")
+    elif offer_id and offer_id in indexes["box_by_offer"]:
+        reasons.append("already_collected_to_box")
+        details.append("已进入妙手采集箱")
+    if url_key and other_candidate(indexes["candidate_by_url"], url_key):
+        reasons.append("duplicate_url")
+        details.append("已存在同链接候选")
+    elif url_key and url_key in indexes["product_by_url"]:
+        reasons.append("duplicate_url")
+        details.append("已存在同链接正式商品")
+    elif url_key and url_key in indexes["box_by_url"]:
+        reasons.append("already_collected_to_box")
+        details.append("已进入妙手采集箱")
+    if title_key and other_candidate(indexes["candidate_by_title"], title_key):
+        reasons.append("duplicate_title")
+        details.append("标题与历史候选高度相似")
+    elif title_key and title_key in indexes["product_by_title"]:
+        reasons.append("duplicate_title")
+        details.append("标题与正式商品相似")
+    elif title_key and title_key in indexes["box_by_title"]:
+        reasons.append("already_collected_to_box")
+        details.append("标题与采集箱记录相似")
+    if image_key and other_candidate(indexes["candidate_by_image"], image_key):
+        reasons.append("duplicate_image")
+        details.append("主图与历史候选重复")
+    elif image_key and image_key in indexes["product_by_image"]:
+        reasons.append("duplicate_image")
+        details.append("主图与正式商品重复")
+    elif image_key and image_key in indexes["box_by_image"]:
+        reasons.append("duplicate_image")
+        details.append("主图与采集箱记录重复")
+    if offer_id and offer_id in indexes["run_by_offer"]:
+        reasons.append("already_collected_to_box")
+        details.append("历史任务中已出现相同商品")
+    if url_key and url_key in indexes["run_by_url"]:
+        reasons.append("already_collected_to_box")
+        details.append("历史任务中已出现相同链接")
+    if not reasons:
+        if similar_title(indexes["candidate_by_title"]):
+            reasons.append("needs_manual_duplicate_check")
+            details.append("标题与历史候选高度相似")
+        elif similar_title(indexes["product_by_title"]):
+            reasons.append("needs_manual_duplicate_check")
+            details.append("标题与正式商品高度相似")
+        elif similar_title(indexes["box_by_title"]):
+            reasons.append("needs_manual_duplicate_check")
+            details.append("标题与采集箱记录高度相似")
+    reasons = list(dict.fromkeys(reasons))
+    dedupe_status = "new_candidate"
+    if "already_collected_to_box" in reasons:
+        dedupe_status = "already_collected_to_box"
+    elif "duplicate_offer_id" in reasons:
+        dedupe_status = "duplicate_offer_id"
+    elif "duplicate_url" in reasons:
+        dedupe_status = "duplicate_url"
+    elif "duplicate_image" in reasons:
+        dedupe_status = "duplicate_image"
+    elif "duplicate_title" in reasons:
+        dedupe_status = "duplicate_title"
+    elif "needs_manual_duplicate_check" in reasons:
+        dedupe_status = "needs_manual_duplicate_check"
+    if reasons and dedupe_status == "new_candidate":
+        dedupe_status = "needs_manual_duplicate_check"
+    return {
+        "dedupe_status": dedupe_status,
+        "dedupe_reason": "；".join(dict.fromkeys(details)) if details else "",
+        "dedupe_reasons": reasons,
+        "skip": dedupe_status in DEDUPE_SKIP_STATUSES,
+    }
+
+
+def dedupe_candidates(candidate_ids=None):
+    ids = candidate_ids or [item["id"] for item in DB.list_candidates()]
+    indexes = history_dedupe_indexes()
+    results = []
+    skipped = []
+    needs_manual = []
+    for candidate_id in ids:
+        candidate = DB.get_candidate(candidate_id)
+        if not candidate:
+            continue
+        analysis = analyze_candidate_dedupe(candidate, indexes)
+        updated = DB.update_candidate(candidate_id, {
+            "dedupe_status": analysis["dedupe_status"],
+            "dedupe_reason": analysis["dedupe_reason"],
+            "dedupe_reasons": analysis["dedupe_reasons"],
+            "dedupe_checked_at": int(time.time()),
+        })
+        summary = candidate_summary(updated)
+        results.append(summary)
+        if analysis["skip"]:
+            skipped.append({
+                "id": candidate_id,
+                "title": summary.get("title") or summary.get("source_product_id") or candidate_id,
+                "dedupeStatus": analysis["dedupe_status"],
+                "dedupeReason": analysis["dedupe_reason"],
+                "dedupeReasons": analysis["dedupe_reasons"],
+                "error": analysis["dedupe_reason"] or DEDUPE_STATUS_LABELS.get(analysis["dedupe_status"], analysis["dedupe_status"]),
+            })
+        elif analysis["dedupe_status"] == "needs_manual_duplicate_check":
+            needs_manual.append({
+                "id": candidate_id,
+                "title": summary.get("title") or summary.get("source_product_id") or candidate_id,
+                "dedupeStatus": analysis["dedupe_status"],
+                "dedupeReason": analysis["dedupe_reason"],
+                "dedupeReasons": analysis["dedupe_reasons"],
+                "error": analysis["dedupe_reason"] or "疑似重复，需要人工确认",
+            })
+    return {"items": results, "skipped": skipped, "needsManual": needs_manual}
+
+
 def collect_qualified_candidates(candidate_ids, markets=None, review=False):
     threshold = float(DB.setting("evaluation.threshold", 70))
     confidence = float(DB.setting("evaluation.min_confidence", 70))
@@ -526,6 +831,15 @@ def collect_qualified_candidates(candidate_ids, markets=None, review=False):
         if requested and candidate["id"] not in requested:
             continue
         summary = candidate_summary(candidate)
+        if summary.get("duplicateSkipped"):
+            blocked.append({
+                "id": candidate["id"],
+                "title": summary.get("title") or summary.get("source_product_id") or candidate["id"],
+                "dedupeStatus": summary.get("dedupeStatus"),
+                "dedupeReason": summary.get("dedupeReason"),
+                "error": "重复候选已跳过，不进入自动采集",
+            })
+            continue
         if not summary["isReadyToScore"]:
             blocked.append({
                 "id": candidate["id"],
@@ -982,6 +1296,7 @@ def collection_queue_summary(status=""):
             or candidate["id"] in existing_candidate_ids
             or candidate["id"] in collected_candidate_ids
             or candidate.get("collected_at")
+            or candidate.get("duplicateSkipped")
         ):
             continue
         collectable = candidate.get("marketSummary", {}).get("collectableMarkets") or candidate.get("qualifiedMarkets") or []
@@ -1023,6 +1338,29 @@ def collection_queue_summary(status=""):
         "queues": [{"key": key, "name": name, "count": counts.get(key, 0)} for key, name in COLLECTION_QUEUE_DEFINITIONS],
         "items": filtered,
         "count": len(filtered),
+    }
+
+
+def dedupe_queue_summary(status=""):
+    status = str(status or "").strip()
+    items = [candidate_summary(item) for item in DB.list_candidates()]
+    if status == "new_candidate":
+        items = [item for item in items if item.get("dedupeStatus") == "new_candidate"]
+    elif status == "duplicate_skipped":
+        items = [item for item in items if item.get("queue") == "duplicate_skipped"]
+    elif status:
+        items = [item for item in items if item.get("dedupeStatus") == status]
+    items.sort(key=lambda item: (item.get("dedupe_checked_at") or 0, item.get("created_at") or 0), reverse=True)
+    counts = {key: 0 for key in DEDUPE_STATUS_LABELS}
+    for item in DB.list_candidates():
+        counts[candidate_dedupe_status(item)] = counts.get(candidate_dedupe_status(item), 0) + 1
+    return {
+        "queues": [
+            {"key": key, "name": name, "count": counts.get(key, 0)}
+            for key, name in DEDUPE_STATUS_LABELS.items()
+        ],
+        "items": items,
+        "count": len(items),
     }
 
 
@@ -1262,6 +1600,8 @@ def refresh_candidate_from_source(candidate_id):
     candidate = DB.get_candidate(candidate_id)
     if not candidate:
         return None
+    if candidate_is_duplicate_skipped(candidate):
+        raise ValueError("重复候选已跳过，不进入来源补全")
     scraped = scrape_product(str(candidate.get("source_url") or ""))
     images = scraped.get("images") or candidate.get("images") or []
     title = usable_source_title(scraped.get("title")) or str(candidate.get("title") or "").strip()
@@ -1330,6 +1670,15 @@ def evaluate_candidates(candidate_ids):
         if not candidate:
             continue
         summary = candidate_summary(candidate)
+        if summary.get("duplicateSkipped"):
+            blocked.append({
+                "id": candidate_id,
+                "title": summary.get("title") or summary.get("source_product_id") or candidate_id,
+                "dedupeStatus": summary.get("dedupeStatus"),
+                "dedupeReason": summary.get("dedupeReason"),
+                "error": "重复候选已跳过，不进入评分",
+            })
+            continue
         if not summary["isReadyToScore"]:
             blocked.append({
                 "id": candidate_id,
@@ -1465,6 +1814,22 @@ def ensure_product_from_candidate(candidate_id):
     return product
 
 
+def register_collection_box_record(candidate, run=None, product=None):
+    if not candidate:
+        return None
+    collected_at = int(time.time())
+    return DB.save_collection_box_record({
+        "candidate_id": candidate.get("id") or "",
+        "offer_id": candidate.get("source_product_id") or "",
+        "source_url": candidate.get("source_url") or "",
+        "clean_title": candidate.get("title") or "",
+        "image_status": "approved" if (product or {}).get("mainImage") or (candidate.get("images") or []) else "pending",
+        "collected_at": collected_at,
+        "miaoshou_status": (product or {}).get("status") or candidate.get("status") or "",
+        "run_id": (run or {}).get("id") or "",
+    })
+
+
 def ensure_approved_asset_for_product(product):
     existing = DB.row("SELECT * FROM assets WHERE product_id=? AND approved=1 AND review_status!='rejected' LIMIT 1", (product["id"],))
     if existing:
@@ -1515,7 +1880,7 @@ def selfcheck_repair(max_refresh=5):
     products_before = len(DB.list_products())
     for candidate in DB.list_candidates():
         summary = candidate_summary(candidate)
-        if summary.get("qualifiedMarkets"):
+        if summary.get("qualifiedMarkets") and not summary.get("duplicateSkipped"):
             ensure_product_from_candidate(summary["id"])
     products_after = DB.list_products()
     created = len(products_after) - products_before
@@ -1563,7 +1928,9 @@ def execute_automation_run(run_id, confirm=False):
                 return
         result = AUTOMATION.confirm_publish(run_id) if confirm else AUTOMATION.run(run_id)
         if result and result.get("kind") == "collection" and result.get("status") == "completed":
-            ensure_product_from_candidate(result.get("candidate_id"))
+            product = ensure_product_from_candidate(result.get("candidate_id"))
+            candidate = DB.get_candidate(result.get("candidate_id")) if result.get("candidate_id") else None
+            register_collection_box_record(candidate, run=DB.get_run(run_id), product=product)
         elif result and result.get("kind") == "collection" and result.get("status") == "ready_for_live":
             DB.update_candidate(result.get("candidate_id"), {"status": "等待真实采集"})
         elif result and result.get("kind") == "collection" and result.get("status") in ("blocked", "failed"):
@@ -2547,10 +2914,14 @@ class AppHandler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             status = (query.get("status") or [""])[0]
             candidates = DB.list_candidates()
+            if status in ("new_candidate", "duplicate_skipped"):
+                dedupe_candidates([item["id"] for item in candidates])
             items = filter_candidates_by_status(candidates, status)
             if not status:
                 items = [candidate_summary(item) for item in items]
             return self.send_json({"items": items})
+        if path == "/api/candidates/dedupe":
+            return self.send_json(dedupe_candidates(candidate_ids_from_payload(payload)))
         if path == "/api/evaluations/qualified":
             return self.send_json(qualified_evaluations_summary())
         if path == "/api/collections/queue":

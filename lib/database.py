@@ -61,6 +61,10 @@ class Database:
             sku_complete INTEGER NOT NULL DEFAULT 0,
             risk_flags TEXT NOT NULL DEFAULT '[]',
             images TEXT NOT NULL DEFAULT '[]',
+            dedupe_status TEXT NOT NULL DEFAULT 'new_candidate',
+            dedupe_reason TEXT NOT NULL DEFAULT '',
+            dedupe_reasons TEXT NOT NULL DEFAULT '[]',
+            dedupe_checked_at INTEGER,
             status TEXT NOT NULL DEFAULT '待评估',
             collection_channel TEXT,
             collected_at INTEGER,
@@ -79,6 +83,18 @@ class Database:
             started_at INTEGER NOT NULL,
             finished_at INTEGER,
             error TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS collection_box_records (
+            id TEXT PRIMARY KEY,
+            candidate_id TEXT,
+            offer_id TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            clean_title TEXT NOT NULL DEFAULT '',
+            image_status TEXT NOT NULL DEFAULT '',
+            collected_at INTEGER NOT NULL,
+            miaoshou_status TEXT NOT NULL DEFAULT '',
+            run_id TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS evaluations (
             id TEXT PRIMARY KEY,
@@ -242,6 +258,10 @@ class Database:
                 ("origin_place", "TEXT NOT NULL DEFAULT ''"),
                 ("search_page", "INTEGER NOT NULL DEFAULT 0"),
                 ("search_rank", "INTEGER NOT NULL DEFAULT 0"),
+                ("dedupe_status", "TEXT NOT NULL DEFAULT 'new_candidate'"),
+                ("dedupe_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("dedupe_reasons", "TEXT NOT NULL DEFAULT '[]'"),
+                ("dedupe_checked_at", "INTEGER"),
             ):
                 if name not in candidate_columns:
                     connection.execute("ALTER TABLE candidates ADD COLUMN %s %s" % (name, definition))
@@ -341,7 +361,7 @@ class Database:
         if row is None:
             return None
         item = dict(row)
-        for key in ("risk_flags", "images", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics"):
+        for key in ("risk_flags", "images", "dedupe_reasons", "hard_blocks", "reasons", "metrics", "product_ids", "shop_ids", "summary", "steps", "block_reasons", "context", "diagnostics"):
             if key in item and isinstance(item[key], str):
                 try:
                     item[key] = json.loads(item[key])
@@ -436,14 +456,15 @@ class Database:
             "search_page", "search_rank",
             "monthly_sales", "repurchase_rate", "rating", "supplier_years",
             "dispatch_hours", "weight_g", "image_count", "sku_complete",
-            "risk_flags", "images", "status", "collection_channel", "collected_at",
+            "risk_flags", "images", "dedupe_status", "dedupe_reason", "dedupe_reasons",
+            "dedupe_checked_at", "status", "collection_channel", "collected_at",
         }
         columns = []
         params = []
         for key, value in values.items():
             if key not in allowed:
                 continue
-            if key in ("risk_flags", "images"):
+            if key in ("risk_flags", "images", "dedupe_reasons"):
                 value = json.dumps(value or [], ensure_ascii=False)
             if key == "sku_complete":
                 value = int(bool(value))
@@ -607,6 +628,43 @@ class Database:
 
     def latest_sourcing_run(self):
         return self.row("SELECT * FROM sourcing_runs ORDER BY started_at DESC LIMIT 1")
+
+    def save_collection_box_record(self, values):
+        now = int(time.time())
+        record_id = str(values.get("id") or uuid.uuid4().hex)
+        payload = (
+            record_id,
+            values.get("candidate_id") or values.get("candidateId") or "",
+            values.get("offer_id") or values.get("offerId") or values.get("source_product_id") or "",
+            values.get("source_url") or values.get("sourceUrl") or "",
+            values.get("clean_title") or values.get("cleanTitle") or "",
+            values.get("image_status") or values.get("imageStatus") or "",
+            int(values.get("collected_at") or values.get("collectedAt") or now),
+            values.get("miaoshou_status") or values.get("miaoshouStatus") or "",
+            values.get("run_id") or values.get("runId") or "",
+            now,
+        )
+        with self.lock, self.connect() as connection:
+            connection.execute(
+                """INSERT INTO collection_box_records(
+                    id,candidate_id,offer_id,source_url,clean_title,image_status,
+                    collected_at,miaoshou_status,run_id,created_at
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET
+                    candidate_id=excluded.candidate_id,
+                    offer_id=excluded.offer_id,
+                    source_url=excluded.source_url,
+                    clean_title=excluded.clean_title,
+                    image_status=excluded.image_status,
+                    collected_at=excluded.collected_at,
+                    miaoshou_status=excluded.miaoshou_status,
+                    run_id=excluded.run_id""",
+                payload,
+            )
+        return self.row("SELECT * FROM collection_box_records WHERE id=?", (record_id,))
+
+    def list_collection_box_records(self):
+        return self.rows("SELECT * FROM collection_box_records ORDER BY collected_at DESC, created_at DESC")
 
     def create_run(self, kind, steps, batch_id=None, candidate_id=None, status="queued", context=None):
         run_id = uuid.uuid4().hex

@@ -159,6 +159,60 @@ class WorkflowTest(unittest.TestCase):
         self.assertEqual(deleted["deleted"], [need_data["id"]])
         self.assertIsNone(app.DB.get_candidate(need_data["id"]))
 
+    def test_dedupe_marks_duplicate_offer_id_and_filters_status(self):
+        first = app.DB.import_candidates(["https://detail.1688.com/offer/123456.html"])[0]
+        second = app.DB.import_candidates(["https://example.com/source/other?offerId=123456&skuId=1"])[0]
+        app.DB.update_candidate(first["id"], {"title": "透气运动鞋", "images": ["https://example.com/a.jpg"], "image_count": 1})
+        app.DB.update_candidate(second["id"], {"title": "透气运动鞋二代", "images": ["https://example.com/b.jpg"], "image_count": 1})
+
+        result = app.dedupe_candidates([second["id"]])
+        summary = app.candidate_summary(app.DB.get_candidate(second["id"]))
+        duplicate_items = app.filter_candidates_by_status(app.DB.list_candidates(), "duplicate_skipped")
+        new_items = app.filter_candidates_by_status(app.DB.list_candidates(), "new_candidate")
+
+        self.assertEqual(result["skipped"][0]["dedupeStatus"], "duplicate_offer_id")
+        self.assertTrue(summary["duplicateSkipped"])
+        self.assertFalse(summary["isReadyToScore"])
+        self.assertEqual(summary["queue"], "duplicate_skipped")
+        self.assertEqual([item["id"] for item in duplicate_items], [second["id"]])
+        self.assertEqual([item["id"] for item in new_items], [first["id"]])
+
+    def test_dedupe_checks_collection_box_records(self):
+        candidate = app.DB.import_candidates(["https://detail.1688.com/offer/888001.html"])[0]
+        app.DB.save_collection_box_record({
+            "offer_id": "888001",
+            "source_url": "https://detail.1688.com/offer/888001.html",
+            "clean_title": "历史透气运动鞋",
+            "image_status": "approved",
+            "miaoshou_status": "采集箱",
+            "run_id": "collect-1",
+        })
+
+        result = app.dedupe_candidates([candidate["id"]])
+        summary = app.candidate_summary(app.DB.get_candidate(candidate["id"]))
+
+        self.assertEqual(result["skipped"][0]["dedupeStatus"], "already_collected_to_box")
+        self.assertTrue(summary["duplicateSkipped"])
+        self.assertIn("采集箱", summary["dedupeReason"])
+
+    def test_duplicate_candidate_is_blocked_from_scoring_and_collection_queue(self):
+        candidate = self.collectable_candidate("https://detail.1688.com/offer/888002.html")
+        app.DB.update_candidate(candidate["id"], {
+            "dedupe_status": "duplicate_offer_id",
+            "dedupe_reason": "已存在同 offer_id 候选",
+            "dedupe_reasons": ["duplicate_offer_id"],
+        })
+
+        results, blocked_scoring = app.evaluate_candidates([candidate["id"]])
+        collection = app.collect_qualified_candidates([candidate["id"]])
+        queue = app.collection_queue_summary("pending")
+
+        self.assertEqual(results, [])
+        self.assertEqual(blocked_scoring[0]["error"], "重复候选已跳过，不进入评分")
+        self.assertEqual(collection["items"], [])
+        self.assertEqual(collection["blocked"][0]["error"], "重复候选已跳过，不进入自动采集")
+        self.assertFalse(any(item["candidateId"] == candidate["id"] for item in queue["items"]))
+
     def test_incomplete_candidate_is_blocked_from_scoring_and_collection(self):
         candidate = app.DB.import_candidates(["https://detail.1688.com/offer/789.html"])[0]
         app.DB.save_evaluations(candidate["id"], [{
