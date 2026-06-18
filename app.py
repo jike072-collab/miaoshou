@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import uuid
+from copy import deepcopy
 from difflib import SequenceMatcher
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -27,7 +28,7 @@ from lib.evaluation import evaluate_candidate, evaluation_status
 from lib.image_inspector import analyze_candidate_images, make_image_record_payload
 from lib.image_gateway import ImageGatewayError, generate
 from lib.keychain import get_secret, set_secret
-from lib.local_config import ConfigValidationError, assert_real_pipeline_safety, config_error_response, config_response, config_status, ensure_local_runtime, get_config_value, load_config, load_or_create_token, migrate_config_file, update_config
+from lib.local_config import ConfigValidationError, assert_real_pipeline_safety, config_error_response, config_response, config_status, ensure_local_runtime, get_config_value, load_config, load_or_create_token, migrate_config_file, save_config, update_config, validate_config
 from lib.prompts import PRESETS, build_prompts
 from lib.real1688_adapter import Real1688Adapter, SOURCING_ACTIVE_STATUSES
 from lib.real_miaoshou_adapter import RealMiaoshouAdapter
@@ -4876,21 +4877,26 @@ class AppHandler(BaseHTTPRequestHandler):
                 if recipe is not None:
                     AUTOMATION.ensure_publish_allowed(recipe, "发布动作配方")
                 direct_settings = legacy_settings_direct_payload(values)
+                base = validate_config(workbench_config())["normalized_config"]
+                candidate = deepcopy(base)
+                if settings_patch:
+                    candidate["user"].update(settings_patch)
+                if advanced_patch:
+                    candidate["advanced"].update(advanced_patch)
+                validation = validate_config(candidate)
+                if not validation["valid"]:
+                    raise ConfigValidationError("配置校验失败", validation["errors"], validation["warnings"])
+                config = save_config(DATA_DIR, validation["normalized_config"])
+                sync_settings_from_config(config)
                 if api_key:
                     set_secret(api_key)
-                if settings_patch:
-                    config = update_config(DATA_DIR, settings_patch, "user")
-                    sync_settings_from_config(config)
-                if advanced_patch:
-                    config = update_config(DATA_DIR, advanced_patch, "advanced")
-                    sync_settings_from_config(config)
                 if direct_settings:
                     DB.set_settings(direct_settings)
-                config = workbench_config()
-                sync_settings_from_config(config)
                 return self.send_json({"ok": True, "deprecated": True, "config": config_response(config, trusted_system=get_runtime_system_status())["config"], "warnings": [{"field": "/api/settings", "message": "/api/settings已弃用，后续请使用/api/config", "reason": "/api/settings已弃用，后续请使用/api/config", "value": "", "allowed": "/api/config"}]})
             except ConfigValidationError as exc:
                 return self.send_json(config_error_response(exc.errors, exc.warnings), HTTPStatus.BAD_REQUEST)
+            except RuntimeError as exc:
+                return self.send_json(config_error_response([{"field": "automation.recipe", "reason": str(exc), "message": str(exc), "value": "", "allowed": "不包含发布动作"}]), HTTPStatus.BAD_REQUEST)
 
         if path == "/api/automation/launch":
             return self.send_json(BROWSER.start())

@@ -338,6 +338,101 @@ class ConfigCompatibilityTest(unittest.TestCase):
         self.assertEqual(load_config(self.root)["user"]["minimum_profit_margin"], 0.2)
         self.assertEqual(app.DB.setting("market.target_margin_pct"), 20.0)
 
+    def test_settings_api_rejects_mixed_user_and_invalid_advanced_atomically(self):
+        save_config(self.root, {
+            "keywords": ["运动鞋"],
+            "category": "鞋类",
+            "target_count": 5,
+            "advanced": {"cdp_port": 9333},
+        })
+        app.DB.set_settings({"automation.cdp_port": 9333, "automation.mode": "dry_run"})
+        before_config = (self.root / "config.json").read_text(encoding="utf-8")
+        before_settings = app.DB.settings()
+
+        with patch("app.set_secret") as set_secret_mock, \
+             patch("app.save_config", wraps=app.save_config) as save_config_mock, \
+             patch("app.sync_settings_from_config", wraps=app.sync_settings_from_config) as sync_mock:
+            response = self.handler().route_post("/api/settings", {
+                "category": "凉鞋",
+                "automation.cdp_port": 70000,
+            })
+
+        self.assertEqual(response["status"], HTTPStatus.BAD_REQUEST)
+        self.assertFalse(response["payload"]["ok"])
+        self.assertEqual(response["payload"]["errors"][0]["field"], "advanced.cdp_port")
+        self.assertEqual((self.root / "config.json").read_text(encoding="utf-8"), before_config)
+        self.assertEqual(app.DB.settings(), before_settings)
+        self.assertEqual(load_config(self.root)["user"]["category"], "鞋类")
+        self.assertEqual(load_config(self.root)["advanced"]["cdp_port"], 9333)
+        set_secret_mock.assert_not_called()
+        save_config_mock.assert_not_called()
+        sync_mock.assert_not_called()
+
+    def test_settings_api_rejects_api_key_with_invalid_advanced_without_side_effects(self):
+        save_config(self.root, {"keywords": ["运动鞋"], "category": "鞋类", "target_count": 5})
+        app.DB.set_settings({"automation.cdp_port": 9222, "automation.mode": "dry_run"})
+        before_config = (self.root / "config.json").read_text(encoding="utf-8")
+        before_settings = app.DB.settings()
+
+        with patch("app.set_secret") as set_secret_mock, \
+             patch("app.save_config", wraps=app.save_config) as save_config_mock, \
+             patch("app.sync_settings_from_config", wraps=app.sync_settings_from_config) as sync_mock:
+            response = self.handler().route_post("/api/settings", {
+                "image.api_key": "new-secret",
+                "automation.cdp_port": "bad-port",
+            })
+
+        self.assertEqual(response["status"], HTTPStatus.BAD_REQUEST)
+        self.assertFalse(response["payload"]["ok"])
+        self.assertEqual(response["payload"]["errors"][0]["field"], "advanced.cdp_port")
+        self.assertEqual((self.root / "config.json").read_text(encoding="utf-8"), before_config)
+        self.assertEqual(app.DB.settings(), before_settings)
+        set_secret_mock.assert_not_called()
+        save_config_mock.assert_not_called()
+        sync_mock.assert_not_called()
+
+    def test_settings_api_saves_user_and_advanced_once_after_full_validation(self):
+        save_config(self.root, {"keywords": ["运动鞋"], "category": "鞋类", "target_count": 5})
+
+        with patch("app.save_config", wraps=app.save_config) as save_config_mock:
+            response = self.handler().route_post("/api/settings", {
+                "category": "凉鞋",
+                "automation.cdp_port": 9555,
+                "automation.mode": "collect_to_box",
+            })
+
+        config = load_config(self.root)
+        self.assertEqual(response["status"], HTTPStatus.OK)
+        self.assertEqual(save_config_mock.call_count, 1)
+        self.assertEqual(config["user"]["category"], "凉鞋")
+        self.assertEqual(config["user"]["run_mode"], "collect_to_box")
+        self.assertEqual(config["advanced"]["cdp_port"], 9555)
+        self.assertEqual(app.DB.setting("automation.mode"), "live")
+        self.assertEqual(app.DB.setting("automation.cdp_port"), 9555)
+
+    def test_settings_api_rejects_unsafe_recipe_without_side_effects(self):
+        save_config(self.root, {"keywords": ["运动鞋"], "category": "鞋类", "target_count": 5})
+        app.DB.set_settings({"automation.cdp_port": 9222, "automation.mode": "dry_run"})
+        before_config = (self.root / "config.json").read_text(encoding="utf-8")
+        before_settings = app.DB.settings()
+
+        with patch("app.set_secret") as set_secret_mock, \
+             patch("app.save_config", wraps=app.save_config) as save_config_mock, \
+             patch("app.sync_settings_from_config", wraps=app.sync_settings_from_config) as sync_mock:
+            response = self.handler().route_post("/api/settings", {
+                "category": "凉鞋",
+                "image.api_key": "new-secret",
+                "automation.publish_recipe": [{"type": "clickText", "text": "最终发布"}],
+            })
+
+        self.assertEqual(response["status"], HTTPStatus.BAD_REQUEST)
+        self.assertFalse(response["payload"]["ok"])
+        self.assertEqual((self.root / "config.json").read_text(encoding="utf-8"), before_config)
+        self.assertEqual(app.DB.settings(), before_settings)
+        set_secret_mock.assert_not_called()
+        save_config_mock.assert_not_called()
+        sync_mock.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
