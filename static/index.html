@@ -14,7 +14,7 @@
       <span><strong>妙手智能选品</strong><small>SEA PRODUCT COMMAND CENTER</small></span>
     </a>
     <nav class="top-actions">
-      <span id="runtime-badge" class="local-badge"><i></i> 演练模式</span>
+      <span id="runtime-badge" class="local-badge"><i></i> 模拟运行</span>
       <a class="button ghost small" href="/api/export.csv">导出商品</a>
     </nav>
   </header>
@@ -33,7 +33,7 @@
     </section>
 
     <section class="local-safety-strip" aria-label="本地安全开关">
-      <article><span>运行模式</span><strong id="local-mode">real</strong></article>
+      <article><span>运行模式</span><strong id="local-mode">模拟运行</strong></article>
       <article><span>dry_run_collect</span><strong id="local-dry-run">true</strong></article>
       <article class="danger"><span>no_publish</span><strong id="local-no-publish">true</strong></article>
       <article><span>采集箱模式</span><strong id="local-collect-box-only">true</strong></article>
@@ -255,6 +255,19 @@
 
     <section id="view-settings" class="module-view hidden">
       <div class="settings-grid">
+        <form id="user-config-settings" class="panel settings-card">
+          <p class="eyebrow">TASK CONFIG</p><h2>基础任务配置</h2>
+          <label><span>商品类目</span><input name="category" required></label>
+          <label><span>搜索关键词</span><textarea name="keywords" rows="4" placeholder="每行一个关键词"></textarea></label>
+          <div class="two-columns"><label><span>目标采集数量</span><input name="target_count" type="number" min="1" max="500" step="1"></label><label><span>候选商品上限</span><input name="candidate_limit" type="number" min="1" max="2000" step="1"></label></div>
+          <div class="two-columns"><label><span>最低采购价（人民币元）</span><input name="purchase_price_min" type="number" min="0" step="0.01"></label><label><span>最高采购价（人民币元）</span><input name="purchase_price_max" type="number" min="0" step="0.01"></label></div>
+          <div class="two-columns"><label><span>最大重量（公斤）</span><input name="max_weight_kg" type="number" min="0.01" step="0.01"></label><label><span>最低利润率（0.2=20%）</span><input name="minimum_profit_margin" type="number" min="0" max="1" step="0.01"></label></div>
+          <label class="switch-row"><input name="auto_season_check" type="checkbox"> 自动判断季节</label>
+          <label><span>图片处理策略</span><select name="image_strategy"><option value="original">保留原图</option><option value="inspect_and_fix">检查并处理</option><option value="regenerate">重新生成</option></select></label>
+          <label><span>运行模式</span><select name="run_mode"><option value="simulation">模拟运行</option><option value="collect_to_box">采集到妙手采集箱</option></select></label>
+          <p id="user-config-message" class="muted-line"></p>
+          <button class="button dark" type="submit">保存基础配置</button>
+        </form>
         <form id="image-settings" class="panel settings-card">
           <p class="eyebrow">IMAGE RELAY</p><h2>图片中转站</h2>
           <label><span>协议</span><select name="image.protocol"><option value="openai">OpenAI兼容</option><option value="custom">自定义JSON</option></select></label>
@@ -276,7 +289,7 @@
         </form>
         <form id="automation-settings" class="panel settings-card">
           <p class="eyebrow">MIAOSHOU AUTOMATION</p><h2>Chrome与妙手</h2>
-          <label><span>执行模式</span><select name="automation.mode"><option value="dry_run">演练模式</option><option value="live">真实模式</option></select></label>
+          <label><span>执行模式</span><select name="automation.mode"><option value="simulation">模拟运行</option><option value="collect_to_box">采集到妙手采集箱</option></select></label>
           <label><span>Chrome路径</span><input name="automation.chrome_path"></label>
           <label><span>CDP端口</span><input name="automation.cdp_port" type="number" value="9222"></label>
           <label><span>妙手入口</span><input name="automation.miaoshou_url"></label>

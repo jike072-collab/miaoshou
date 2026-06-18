@@ -39,7 +39,8 @@ class AutomationTest(unittest.TestCase):
         path.write_text("chrome")
         self.db.set_settings({"automation.chrome_path": "/missing/chrome"})
         output = str(path) + " --some-flag\n"
-        with patch("lib.automation.subprocess.run") as run:
+        with patch("lib.automation.Path.is_file", autospec=True) as is_file, patch("lib.automation.subprocess.run") as run:
+            is_file.side_effect = lambda self: str(self) == str(path)
             run.return_value.stdout = output
             self.assertEqual(self.engine.resolve_chrome_path(), path)
 
