@@ -7,10 +7,13 @@ import io
 import json
 import mimetypes
 import os
+import platform
 import re
+import sys
 import threading
 import time
 import uuid
+from copy import deepcopy
 from difflib import SequenceMatcher
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -25,7 +28,7 @@ from lib.evaluation import evaluate_candidate, evaluation_status
 from lib.image_inspector import analyze_candidate_images, make_image_record_payload
 from lib.image_gateway import ImageGatewayError, generate
 from lib.keychain import get_secret, set_secret
-from lib.local_config import assert_real_pipeline_safety, config_status, ensure_local_runtime, load_config, load_or_create_token, save_config
+from lib.local_config import ConfigValidationError, assert_real_pipeline_safety, config_error_response, config_response, config_status, ensure_local_runtime, get_config_value, load_config, load_or_create_token, migrate_config_file, save_config, update_config, validate_config
 from lib.prompts import PRESETS, build_prompts
 from lib.real1688_adapter import Real1688Adapter, SOURCING_ACTIVE_STATUSES
 from lib.real_miaoshou_adapter import RealMiaoshouAdapter
@@ -201,11 +204,18 @@ WORKFLOW_STAGE_LABELS = {
 
 def initialize():
     ensure_local_runtime(DATA_DIR)
+    report = migrate_config_file(DATA_DIR, settings=DB.settings())
+    if report.get("migrated"):
+        print("[config] migrated legacy config to version %s; changed=%s ignored=%s" % (
+            report.get("target_version"),
+            ",".join(report.get("changed_fields") or []) or "-",
+            ",".join(report.get("ignored_fields") or []) or "-",
+        ))
     SOURCING.dedupe_callback = lambda candidate_ids: dedupe_candidates(candidate_ids)
     SOURCING.precheck_callback = lambda candidate_ids: precheck_candidates(candidate_ids)
     MIAOSHOU.candidate_summary = lambda candidate: candidate_summary(candidate)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
-    apply_config_to_settings()
+    sync_settings_from_config()
     DB.migrate_products_json(DATA_DIR / "products.json")
     DB.execute("UPDATE automation_runs SET status='queued',error='服务重启后等待恢复' WHERE status IN ('running','preparing')")
     DB.execute("UPDATE generation_jobs SET status='queued',error='服务重启后等待恢复' WHERE status='running'")
@@ -215,13 +225,100 @@ def workbench_config():
     return load_config(DATA_DIR)
 
 
-def apply_config_to_settings(config=None):
+def sync_settings_from_config(config=None):
     config = config or workbench_config()
-    DB.set_settings({
-        "automation.cdp_port": int(config.get("chrome_debug_port") or 9222),
-        "automation.chrome_profile_dir": config.get("chrome_profile_dir") or "data/chrome-profile",
-    })
-    return config
+    payload = {
+        "automation.mode": "dry_run" if get_config_value("user.run_mode", "simulation", config=config) == "simulation" else "live",
+        "automation.cdp_port": int(config.get("chrome_debug_port") or get_config_value("advanced.cdp_port", 9222, config=config)),
+        "automation.chrome_profile_dir": config.get("chrome_profile_dir") or get_config_value("advanced.browser_user_data_dir", "data/chrome-profile", config=config),
+        "automation.chrome_path": get_config_value("advanced.browser_path", "", config=config),
+        "automation.alibaba_url": get_config_value("advanced.alibaba_url", "https://www.1688.com/", config=config),
+        "automation.miaoshou_url": get_config_value("advanced.miaoshou_url", "https://erp.91miaoshou.com/", config=config),
+        "automation.plugin_unpack_dir": get_config_value("advanced.plugin_unpack_dir", DB.setting("automation.plugin_unpack_dir", ""), config=config),
+        "automation.plugin_extension_id": get_config_value("advanced.plugin_id", "", config=config),
+        "image.base_url": get_config_value("advanced.image_service_url", "", config=config),
+        "image.timeout": get_config_value("advanced.image_service_timeout_seconds", 30, config=config),
+        "image.retries": get_config_value("advanced.step_retry_count", 2, config=config),
+        "market.target_margin_pct": float(get_config_value("user.minimum_profit_margin", 0.2, config=config) or 0) * 100,
+        "automation.node_path": DB.setting("automation.node_path", ""),
+        "automation.collection_recipe": DB.setting("automation.collection_recipe", []),
+        "automation.link_collection_recipe": DB.setting("automation.link_collection_recipe", []),
+        "automation.miaoshou_box_recipe": DB.setting("automation.miaoshou_box_recipe", []),
+    }
+    DB.set_settings(payload)
+    return payload
+
+
+apply_config_to_settings = sync_settings_from_config
+
+
+def get_runtime_system_status():
+    status = {
+        "platform": platform.system() or sys.platform,
+        "python_version": platform.python_version(),
+        "chrome_detected": False,
+        "cdp_available": False,
+        "alibaba_logged_in": False,
+        "miaoshou_logged_in": False,
+        "plugin_detected": False,
+        "last_environment_check_at": str(int(time.time())),
+    }
+    try:
+        preflight = AUTOMATION.preflight()
+        status.update({
+            "chrome_detected": bool(preflight.get("chromeInstalled")),
+            "cdp_available": bool(preflight.get("cdpConnected")),
+            "alibaba_logged_in": bool(preflight.get("alibabaLoginVerified")),
+            "miaoshou_logged_in": bool(preflight.get("miaoshouLoginVerified")),
+            "plugin_detected": bool(preflight.get("pluginVerified")),
+        })
+    except Exception:
+        pass
+    return status
+
+
+CONFIG_MIRRORED_SETTINGS_KEYS = {
+    "automation.mode",
+    "automation.cdp_port",
+    "automation.chrome_profile_dir",
+    "automation.chrome_path",
+    "automation.alibaba_url",
+    "automation.miaoshou_url",
+    "automation.plugin_extension_id",
+    "image.base_url",
+    "image.timeout",
+    "image.retries",
+    "market.target_margin_pct",
+}
+
+LEGACY_SETTINGS_DIRECT_PREFIXES = ("evaluation.", "automation.", "image.", "text.", "market.")
+LEGACY_SETTINGS_DIRECT_EXCLUDE = CONFIG_MIRRORED_SETTINGS_KEYS | {
+    "category",
+    "keywords",
+    "target_count",
+    "candidate_limit",
+    "min_price",
+    "max_price",
+    "purchase_price_min",
+    "purchase_price_max",
+    "weight_limit",
+    "max_weight_kg",
+    "profit_margin",
+    "minimum_profit_margin",
+    "auto_season_check",
+    "image_mode",
+    "image_strategy",
+    "run_mode",
+    "system",
+}
+
+
+def legacy_settings_direct_payload(values):
+    return {
+        key: value
+        for key, value in values.items()
+        if key.startswith(LEGACY_SETTINGS_DIRECT_PREFIXES) and key not in LEGACY_SETTINGS_DIRECT_EXCLUDE
+    }
 
 
 def local_status():
@@ -4217,7 +4314,7 @@ class AppHandler(BaseHTTPRequestHandler):
             return
         self.send_response(HTTPStatus.NO_CONTENT)
         self.common_headers()
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Workbench-Token")
         self.end_headers()
 
@@ -4229,7 +4326,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/local/status":
             return self.send_json(local_status())
         if path == "/api/config":
-            return self.send_json(workbench_config())
+            return self.send_json(config_response(workbench_config(), trusted_system=get_runtime_system_status()))
         if path == "/api/browser/status":
             return self.send_json(BROWSER.status())
         if path == "/api/platform/status":
@@ -4341,6 +4438,9 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             values = DB.settings()
             values["image.has_api_key"] = bool(get_secret())
+            values["_deprecated"] = True
+            values["_config"] = config_response(workbench_config(), trusted_system=get_runtime_system_status())["config"]
+            values["_warnings"] = [{"field": "/api/settings", "message": "/api/settings已弃用，后续请使用/api/config", "reason": "/api/settings已弃用，后续请使用/api/config", "value": "", "allowed": "/api/config"}]
             return self.send_json(values)
         if path == "/api/automation/preflight":
             return self.send_json(AUTOMATION.preflight())
@@ -4406,9 +4506,13 @@ class AppHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             return self.send_json({"error": "内部错误：%s" % exc}, HTTPStatus.INTERNAL_SERVER_ERROR)
 
+    def do_PUT(self):
+        return self.do_POST()
+
     def route_post(self, path, payload):
-        if path == "/api/config":
-            return self.send_json(apply_config_to_settings(save_config(DATA_DIR, payload)))
+        if path in ("/api/config", "/api/config/advanced"):
+            section = "advanced" if path == "/api/config/advanced" else "user"
+            return self.save_config_section(section, payload)
 
         if path == "/api/browser/start":
             return self.send_json(BROWSER.start())
@@ -4763,21 +4867,153 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             values = dict(payload)
             api_key = values.pop("image.api_key", "")
-            if api_key:
-                set_secret(api_key)
-            box_recipe = values.get("automation.miaoshou_box_recipe")
-            if box_recipe is not None:
-                AUTOMATION.ensure_publish_allowed(box_recipe, "妙手采集箱安全配方")
-            recipe = values.get("automation.publish_recipe")
-            if recipe is not None:
-                AUTOMATION.ensure_publish_allowed(recipe, "发布动作配方")
-            allowed_prefixes = ("evaluation.", "automation.", "image.", "text.", "market.")
-            DB.set_settings({key: value for key, value in values.items() if key.startswith(allowed_prefixes)})
-            return self.send_json({"ok": True})
+            try:
+                settings_patch = self.settings_payload_to_config_patch(values)
+                advanced_patch = self.settings_payload_to_advanced_config_patch(values)
+                box_recipe = values.get("automation.miaoshou_box_recipe")
+                if box_recipe is not None:
+                    AUTOMATION.ensure_publish_allowed(box_recipe, "妙手采集箱安全配方")
+                recipe = values.get("automation.publish_recipe")
+                if recipe is not None:
+                    AUTOMATION.ensure_publish_allowed(recipe, "发布动作配方")
+                direct_settings = legacy_settings_direct_payload(values)
+                base = validate_config(workbench_config())["normalized_config"]
+                candidate = deepcopy(base)
+                if settings_patch:
+                    candidate["user"].update(settings_patch)
+                if advanced_patch:
+                    candidate["advanced"].update(advanced_patch)
+                validation = validate_config(candidate)
+                if not validation["valid"]:
+                    raise ConfigValidationError("配置校验失败", validation["errors"], validation["warnings"])
+                config = save_config(DATA_DIR, validation["normalized_config"])
+                sync_settings_from_config(config)
+                if api_key:
+                    set_secret(api_key)
+                if direct_settings:
+                    DB.set_settings(direct_settings)
+                return self.send_json({"ok": True, "deprecated": True, "config": config_response(config, trusted_system=get_runtime_system_status())["config"], "warnings": [{"field": "/api/settings", "message": "/api/settings已弃用，后续请使用/api/config", "reason": "/api/settings已弃用，后续请使用/api/config", "value": "", "allowed": "/api/config"}]})
+            except ConfigValidationError as exc:
+                return self.send_json(config_error_response(exc.errors, exc.warnings), HTTPStatus.BAD_REQUEST)
+            except RuntimeError as exc:
+                return self.send_json(config_error_response([{"field": "automation.recipe", "reason": str(exc), "message": str(exc), "value": "", "allowed": "不包含发布动作"}]), HTTPStatus.BAD_REQUEST)
 
         if path == "/api/automation/launch":
             return self.send_json(BROWSER.start())
         return self.send_json({"error": "接口不存在"}, HTTPStatus.NOT_FOUND)
+
+    def save_config_section(self, section, payload):
+        try:
+            values = payload.get("values") if isinstance(payload, dict) and "values" in payload else payload
+            if isinstance(payload, dict) and section == "user" and payload.get("section") not in (None, "", "user"):
+                return self.send_json(config_error_response([{
+                    "field": "section",
+                    "message": "普通配置接口只能修改 user 字段；高级配置请使用 /api/config/advanced",
+                    "reason": "普通配置接口只能修改 user 字段；高级配置请使用 /api/config/advanced",
+                    "value": payload.get("section"),
+                    "allowed": "user",
+                }]), HTTPStatus.BAD_REQUEST)
+            if isinstance(values, dict) and section in values and isinstance(values.get(section), dict):
+                values = values.get(section)
+            config = update_config(DATA_DIR, values or {}, section)
+            sync_settings_from_config(config)
+            return self.send_json(config_response(config, trusted_system=get_runtime_system_status()))
+        except ConfigValidationError as exc:
+            return self.send_json(config_error_response(exc.errors, exc.warnings), HTTPStatus.BAD_REQUEST)
+        except RuntimeError as exc:
+            return self.send_json(config_error_response([{"field": "settings", "reason": str(exc), "message": str(exc), "value": "", "allowed": "settings兼容同步成功"}]), HTTPStatus.INTERNAL_SERVER_ERROR)
+        except ValueError as exc:
+            return self.send_json(config_error_response([{"field": "config", "reason": str(exc), "message": str(exc), "value": "", "allowed": ""}]), HTTPStatus.BAD_REQUEST)
+
+    @staticmethod
+    def settings_target_margin_to_config(value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ConfigValidationError("旧利润率配置无效", [{
+                "field": "market.target_margin_pct",
+                "reason": "必须是数字百分比",
+                "message": "必须是数字百分比",
+                "value": value,
+                "allowed": "0 至 100，例如 20 表示 20%",
+            }])
+        if isinstance(value, bool):
+            raise ConfigValidationError("旧利润率配置无效", [{
+                "field": "market.target_margin_pct",
+                "reason": "必须是数字百分比，不能使用布尔值",
+                "message": "必须是数字百分比，不能使用布尔值",
+                "value": value,
+                "allowed": "0 至 100，例如 20 表示 20%",
+            }])
+        try:
+            parsed = float(str(value).strip() if isinstance(value, str) else value)
+        except (TypeError, ValueError):
+            raise ConfigValidationError("旧利润率配置无效", [{
+                "field": "market.target_margin_pct",
+                "reason": "必须是数字百分比",
+                "message": "必须是数字百分比",
+                "value": value,
+                "allowed": "0 至 100，例如 20 表示 20%",
+            }])
+        if parsed < 0 or parsed > 100:
+            raise ConfigValidationError("旧利润率配置无效", [{
+                "field": "market.target_margin_pct",
+                "reason": "超出允许范围",
+                "message": "超出允许范围",
+                "value": value,
+                "allowed": "0 至 100，例如 20 表示 20%",
+            }])
+        return parsed / 100
+
+    @staticmethod
+    def settings_payload_to_config_patch(values):
+        patch = {}
+        mapping = {
+            "category": "category",
+            "target_count": "target_count",
+            "candidate_limit": "candidate_limit",
+            "min_price": "purchase_price_min",
+            "max_price": "purchase_price_max",
+            "purchase_price_min": "purchase_price_min",
+            "purchase_price_max": "purchase_price_max",
+            "weight_limit": "max_weight_kg",
+            "max_weight_kg": "max_weight_kg",
+            "profit_margin": "minimum_profit_margin",
+            "minimum_profit_margin": "minimum_profit_margin",
+            "auto_season_check": "auto_season_check",
+            "image_mode": "image_strategy",
+            "image_strategy": "image_strategy",
+            "run_mode": "run_mode",
+        }
+        for old_key, new_key in mapping.items():
+            if old_key in values:
+                patch[new_key] = values[old_key]
+        if "keywords" in values:
+            patch["keywords"] = values["keywords"]
+        if values.get("automation.mode") in ("dry_run", "simulation"):
+            patch["run_mode"] = "simulation"
+        elif values.get("automation.mode") in ("live", "collect_to_box"):
+            patch["run_mode"] = "collect_to_box"
+        if "market.target_margin_pct" in values:
+            patch["minimum_profit_margin"] = AppHandler.settings_target_margin_to_config(values["market.target_margin_pct"])
+        return patch
+
+    @staticmethod
+    def settings_payload_to_advanced_config_patch(values):
+        patch = {}
+        mapping = {
+            "automation.chrome_path": "browser_path",
+            "automation.chrome_profile_dir": "browser_user_data_dir",
+            "automation.cdp_port": "cdp_port",
+            "automation.alibaba_url": "alibaba_url",
+            "automation.miaoshou_url": "miaoshou_url",
+            "automation.plugin_extension_id": "plugin_id",
+            "image.base_url": "image_service_url",
+            "image.timeout": "image_service_timeout_seconds",
+            "image.retries": "step_retry_count",
+        }
+        for old_key, new_key in mapping.items():
+            if old_key in values:
+                patch[new_key] = values[old_key]
+        return patch
 
     def do_DELETE(self):
         if self.reject_cross_origin():

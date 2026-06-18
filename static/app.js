@@ -1,4 +1,4 @@
-const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, miaoshouRecords: [], sourcing: { run: {}, config: {}, status: "idle" }, automation: { status: "idle", counters: {}, steps: [] }, automationLogs: [], automationFailures: [], batchPreview: null, workflow: [], settings: {}, browserStatus: {}, platformStatus: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null, localStatus: {}, workbenchToken: "" };
+const state = { candidates: [], products: [], shops: [], batches: [], runs: [], publishResults: { overview: {}, failures: [], waiting: [], recent: [] }, imageJobs: [], imageSummary: { overview: {}, items: [] }, collectionQueue: { queues: [], items: [] }, miaoshouRecords: [], sourcing: { run: {}, config: {}, status: "idle" }, automation: { status: "idle", counters: {}, steps: [] }, automationLogs: [], automationFailures: [], batchPreview: null, workflow: [], settings: {}, config: { version: 1, user: {}, advanced: {}, system: {} }, configWarnings: [], browserStatus: {}, platformStatus: {}, currentCandidate: null, candidateQueue: "need_data", collectionQueueStatus: "pending", imageQueue: "all", currentAssetProductId: null, currentCollectionTask: null, localStatus: {}, workbenchToken: "" };
 const markets = { MY: "马来西亚", PH: "菲律宾", SG: "新加坡", TH: "泰国", VN: "越南" };
 const precheckLabels = {
   not_checked: "未预检",
@@ -52,11 +52,15 @@ async function api(url, options = {}) {
   const response = await fetch(url, { headers, ...options });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    const error = new Error(data.error || `请求失败（${response.status}）`);
+    const error = new Error(data.error || formatApiIssues(data.errors) || `请求失败（${response.status}）`);
     Object.assign(error, data);
     throw error;
   }
   return data;
+}
+
+function formatApiIssues(issues = []) {
+  return (issues || []).map((issue) => issue.message || issue.reason || issue.field || "").filter(Boolean).join("；");
 }
 
 function esc(value) {
@@ -232,7 +236,7 @@ function renderCandidateAccess(item) {
 }
 
 function renderLocalStatus(status = {}) {
-  $("#local-mode").textContent = status.mode || "real";
+  $("#local-mode").textContent = status.runMode === "collect_to_box" ? "采集到妙手采集箱" : "模拟运行";
   $("#local-dry-run").textContent = status.dryRunCollect ? "true" : "false";
   const boxOnly = Object.prototype.hasOwnProperty.call(status, "collectToBoxOnly") ? status.collectToBoxOnly : true;
   if ($("#local-collect-box-only")) $("#local-collect-box-only").textContent = boxOnly ? "true" : "false";
@@ -243,8 +247,8 @@ function renderLocalStatus(status = {}) {
 }
 
 async function loadAll() {
-  const [localStatus, browserStatus, platformStatus, sourcing, automation, automationLogs, automationFailures, dashboard, workflow, candidates, products, shops, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue, miaoshouRecords, settings, selfcheck] = await Promise.all([
-    api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"), api("/api/sourcing/current"), api("/api/automation/current"), api("/api/automation/logs?limit=80"), api("/api/automation/failures"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/shops"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`), api("/api/miaoshou/collection-box-records"), api("/api/settings"), api("/api/selfcheck"),
+  const [localStatus, browserStatus, platformStatus, sourcing, automation, automationLogs, automationFailures, dashboard, workflow, candidates, products, shops, batches, runs, publishResults, imageJobs, imageSummary, collectionQueue, miaoshouRecords, configResponse, settings, selfcheck] = await Promise.all([
+    api("/api/local/status"), api("/api/browser/status"), api("/api/platform/status"), api("/api/sourcing/current"), api("/api/automation/current"), api("/api/automation/logs?limit=80"), api("/api/automation/failures"), api("/api/dashboard"), api("/api/workflow/summary"), api("/api/candidates"), api("/api/products"), api("/api/shops"), api("/api/batches"), api("/api/runs"), api("/api/publish/results"), api("/api/images/jobs"), api("/api/images/summary"), api(`/api/collections/queue?status=${encodeURIComponent(state.collectionQueueStatus)}`), api("/api/miaoshou/collection-box-records"), api("/api/config"), api("/api/settings"), api("/api/selfcheck"),
   ]);
   state.localStatus = localStatus;
   state.workbenchToken = localStatus.token || "";
@@ -265,11 +269,13 @@ async function loadAll() {
   state.imageSummary = imageSummary;
   state.collectionQueue = collectionQueue;
   state.miaoshouRecords = miaoshouRecords.items || [];
+  state.config = configResponse.config || state.config;
+  state.configWarnings = configResponse.warnings || [];
   state.settings = settings;
   $("#metric-candidates").textContent = dashboard.candidates;
   $("#metric-qualified").textContent = dashboard.qualified;
   $("#metric-products").textContent = dashboard.products;
-  $("#runtime-badge").innerHTML = `<i></i> ${localStatus.mode === "real" ? "真实模式" : "演练模式"}`;
+  $("#runtime-badge").innerHTML = `<i></i> ${localStatus.runMode === "collect_to_box" ? "采集到妙手采集箱" : "模拟运行"}`;
   renderLocalStatus(localStatus);
   renderWorkflow();
   renderAutomationConsole();
@@ -1167,13 +1173,55 @@ function renderRuns() {
 }
 
 function populateSettings() {
+  populateUserConfigSettings();
   for (const form of [$("#image-settings"), $("#automation-settings"), $("#evaluation-settings")]) {
     for (const element of form.elements) {
       if (element.name && Object.hasOwn(state.settings, element.name) && element.name !== "image.api_key") element.value = state.settings[element.name];
       if (element.name && ["automation.miaoshou_box_recipe", "automation.collection_recipe", "automation.link_collection_recipe", "automation.publish_recipe", "image.request_template"].includes(element.name)) element.value = JSON.stringify(state.settings[element.name] || (element.name === "image.request_template" ? {} : []), null, 2);
     }
   }
+  const automationMode = $("#automation-settings")?.elements["automation.mode"];
+  if (automationMode) {
+    automationMode.value = state.settings["automation.mode"] === "live" || state.settings["automation.mode"] === "collect_to_box" ? "collect_to_box" : "simulation";
+  }
   $("#image-settings").elements["image.api_key"].placeholder = state.settings["image.has_api_key"] ? "已保存，留空则不修改" : "尚未配置";
+}
+
+function populateUserConfigSettings() {
+  const form = $("#user-config-settings");
+  if (!form) return;
+  const user = state.config?.user || {};
+  form.elements.category.value = user.category || "";
+  form.elements.keywords.value = (user.keywords || []).join("\n");
+  for (const key of ["target_count", "candidate_limit", "purchase_price_min", "purchase_price_max", "max_weight_kg", "minimum_profit_margin"]) {
+    form.elements[key].value = user[key] ?? "";
+  }
+  form.elements.auto_season_check.checked = Boolean(user.auto_season_check);
+  form.elements.image_strategy.value = ["original", "inspect_and_fix", "regenerate"].includes(user.image_strategy) ? user.image_strategy : "inspect_and_fix";
+  form.elements.run_mode.value = user.run_mode === "collect_to_box" ? "collect_to_box" : "simulation";
+  const message = $("#user-config-message");
+  if (message) message.textContent = state.configWarnings.length ? formatApiIssues(state.configWarnings.slice(0, 3)) : "";
+}
+
+function numberOrEmpty(value) {
+  const text = String(value ?? "").trim();
+  return text === "" ? "" : Number(text);
+}
+
+function userConfigPayload(form) {
+  return {
+    category: form.elements.category.value,
+    keywords: form.elements.keywords.value.split(/[\n,，]+/).map((item) => item.trim()).filter(Boolean),
+    target_count: numberOrEmpty(form.elements.target_count.value),
+    candidate_limit: numberOrEmpty(form.elements.candidate_limit.value),
+    purchase_price_min: numberOrEmpty(form.elements.purchase_price_min.value),
+    purchase_price_max: numberOrEmpty(form.elements.purchase_price_max.value),
+    max_weight_kg: numberOrEmpty(form.elements.max_weight_kg.value),
+    minimum_profit_margin: numberOrEmpty(form.elements.minimum_profit_margin.value),
+    auto_season_check: form.elements.auto_season_check.checked,
+    image_strategy: form.elements.image_strategy.value,
+    run_mode: form.elements.run_mode.value === "collect_to_box" ? "collect_to_box" : "simulation",
+  };
 }
 
 function renderPreflight(data) {
@@ -1268,7 +1316,7 @@ async function pollRuntime() {
     $("#metric-candidates").textContent = dashboard.candidates;
     $("#metric-qualified").textContent = dashboard.qualified;
     $("#metric-products").textContent = dashboard.products;
-    $("#runtime-badge").innerHTML = `<i></i> ${localStatus.mode === "real" ? "真实模式" : "演练模式"}`;
+    $("#runtime-badge").innerHTML = `<i></i> ${localStatus.runMode === "collect_to_box" ? "采集到妙手采集箱" : "模拟运行"}`;
     renderLocalStatus(localStatus);
     renderEnvironmentStatus(browserStatus, platformStatus, localStatus);
     renderWorkflow();
@@ -1688,17 +1736,67 @@ $("#batch-confirm-form").addEventListener("submit", async (event) => {
 for (const formId of ["image-settings", "automation-settings", "evaluation-settings"]) {
   $(`#${formId}`).addEventListener("submit", async (event) => {
     event.preventDefault();
-    const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    const originalText = button?.textContent || "";
+    if (button?.disabled) return;
+    if (button) {
+      button.disabled = true;
+      button.textContent = "保存中";
+    }
+    const payload = Object.fromEntries(new FormData(form).entries());
     for (const key of ["automation.miaoshou_box_recipe", "automation.collection_recipe", "automation.link_collection_recipe", "automation.publish_recipe", "image.request_template"]) {
       if (key in payload) {
-        try { payload[key] = JSON.parse(payload[key] || "[]"); } catch { return notify(`${key} 不是有效JSON`, "error"); }
+        try { payload[key] = JSON.parse(payload[key] || "[]"); } catch {
+          if (button) {
+            button.disabled = false;
+            button.textContent = originalText;
+          }
+          return notify(`${key} 不是有效JSON`, "error");
+        }
       }
     }
     ["image.timeout", "image.retries", "image.concurrency", "image.poll_interval", "automation.cdp_port", "evaluation.threshold", "evaluation.min_confidence", "evaluation.min_margin"].forEach((key) => { if (key in payload) payload[key] = Number(payload[key]); });
     Object.keys(payload).filter((key) => key.startsWith("market.")).forEach((key) => { payload[key] = Number(payload[key]); });
     try { await api("/api/settings", { method: "POST", body: JSON.stringify(payload) }); notify("设置已保存"); await loadAll(); } catch (error) { notify(error.message, "error"); }
+    finally {
+      if (button) {
+        button.disabled = false;
+        button.textContent = originalText;
+      }
+    }
   });
 }
+
+$("#user-config-settings")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  const message = $("#user-config-message");
+  const originalText = button?.textContent || "";
+  if (button?.disabled) return;
+  if (button) {
+    button.disabled = true;
+    button.textContent = "保存中";
+  }
+  if (message) message.textContent = "";
+  try {
+    const response = await api("/api/config", { method: "PUT", body: JSON.stringify({ values: userConfigPayload(form) }) });
+    state.config = response.config || state.config;
+    state.configWarnings = response.warnings || [];
+    populateUserConfigSettings();
+    notify(state.configWarnings.length ? "基础配置已保存，存在兼容提示" : "基础配置已保存", state.configWarnings.length ? "error" : "success");
+  } catch (error) {
+    const detail = formatApiIssues(error.errors) || error.message;
+    if (message) message.textContent = detail;
+    notify(detail, "error");
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalText;
+    }
+  }
+});
 
 $("#check-automation").addEventListener("click", async () => { try { renderPreflight(await api("/api/automation/preflight")); } catch (error) { notify(error.message, "error"); } });
 $("#launch-chrome").addEventListener("click", async () => { try { await api("/api/browser/start", { method: "POST", body: "{}" }); await refreshEnvironmentStatus("专用Chrome已启动，请在浏览器中完成登录状态确认"); renderPreflight(await api("/api/automation/preflight")); } catch (error) { notify(error.message, "error"); } });
@@ -1721,8 +1819,8 @@ $("#full-selfcheck").addEventListener("click", async () => {
     const result = await api("/api/selfcheck");
     renderSelfcheck(result);
     const unresolved = (result.checks || []).filter((item) => item.status !== "pass").length;
-    $("#selfcheck-result").textContent = result.readyForLive ? "完整自检通过，可进入真实模式。" : `自检完成，仍有 ${unresolved} 项未通过。`;
-    notify(result.readyForLive ? "完整自检通过，可进入真实模式" : "基础自检完成，真实模式仍有待配置项", result.ok ? "success" : "error");
+    $("#selfcheck-result").textContent = result.readyForLive ? "完整自检通过，可采集到妙手采集箱。" : `自检完成，仍有 ${unresolved} 项未通过。`;
+    notify(result.readyForLive ? "完整自检通过，可采集到妙手采集箱" : "基础自检完成，采集箱模式仍有待配置项", result.ok ? "success" : "error");
   } catch (error) { notify(error.message, "error"); }
 });
 $("#repair-selfcheck").addEventListener("click", async () => {
