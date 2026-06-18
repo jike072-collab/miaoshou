@@ -36,7 +36,7 @@
 
 - 返回值由 `config_response(workbench_config())` 生成。
 - `config` 经过 `export_safe_config()` 脱敏。
-- `system` 当前返回空对象，避免把运行时检测细节当成可编辑配置。
+- `system` 只返回安全白名单字段：`platform`、`python_version`、`chrome_detected`、`cdp_available`、`alibaba_logged_in`、`miaoshou_logged_in`、`plugin_detected`、`last_environment_check_at`。
 - 本机路径字段返回 `<local-path>`。
 - `api_key`、`token`、`cookie`、`password`、`secret` 等字段不会返回明文。
 - 配置文件不存在时由 `load_config()` 加载默认配置，并在 warnings 中说明。
@@ -151,7 +151,7 @@
 说明：
 
 - 只允许 `DEFAULT_CONFIG["advanced"]` 中的字段。
-- 仍然不能关闭 `no_publish` 或 `collect_to_box_only`。
+- 仍然不能关闭 `no_publish`、`collect_to_box_only`、`safety_checks_enabled`、`enable_dedupe`、`enable_risk_filter`、`enable_title_clean`。提交 `false` 会返回 400，且不会保存配置或同步 settings。
 - 仍然不能启用 `publish`。
 - system 字段不能通过该接口修改。
 
@@ -174,8 +174,9 @@
 
 处理规则：
 
-- 继续保存 `evaluation.*`、`automation.*`、`image.*`、`text.*`、`market.*` 旧字段。
+- 继续保存无法映射到新版配置的 `evaluation.*`、`automation.*`、`image.*`、`text.*`、`market.*` 旧字段。
 - 能映射到新 user 配置的旧字段会先转换为 `/api/config` 的普通配置补丁。
+- 与新配置重复的旧高级字段会先转换为 `/api/config/advanced` 补丁，不再独立直接写入 settings。
 - 不允许启用发布。
 - 不允许旧接口覆盖 `system.*`。
 - 不允许旧接口反向覆盖新配置中未提交的字段。
@@ -197,6 +198,16 @@
 | `image_mode` / `image_strategy` | `user.image_strategy` |
 | `automation.mode=dry_run/simulation` | `user.run_mode=simulation` |
 | `automation.mode=live/collect_to_box` | `user.run_mode=collect_to_box` |
+| `automation.cdp_port` | `advanced.cdp_port` |
+| `automation.chrome_profile_dir` | `advanced.browser_user_data_dir` |
+| `automation.chrome_path` | `advanced.browser_path` |
+| `automation.alibaba_url` | `advanced.alibaba_url` |
+| `automation.miaoshou_url` | `advanced.miaoshou_url` |
+| `automation.plugin_extension_id` | `advanced.plugin_id` |
+| `image.base_url` | `advanced.image_service_url` |
+| `image.timeout` | `advanced.image_service_timeout_seconds` |
+| `image.retries` | `advanced.step_retry_count` |
+| `market.target_margin_pct` | `user.minimum_profit_margin` |
 
 ## 启动初始化
 
@@ -205,7 +216,7 @@
 1. `ensure_local_runtime(DATA_DIR)`
 2. `migrate_config_file(DATA_DIR, settings=DB.settings())`
 3. 迁移成功时输出安全日志，只打印版本、changed/ignored 字段名
-4. `apply_config_to_settings()`
+4. `sync_settings_from_config()`；`apply_config_to_settings` 仅保留为兼容别名
 5. 继续原有数据库兼容迁移和任务恢复标记
 
 启动日志不输出：
@@ -220,5 +231,5 @@
 
 - 尚未替换所有旧业务模块中的 `DB.setting()` 读取。
 - `/api/settings` 仍然存在，用于旧页面和旧业务兼容。
-- `system` 检测结果当前未持久化为可编辑配置。
+- `system` 检测结果不可通过普通/高级配置 API 修改，当前仅安全导出白名单字段。
 - 发布、铺货、五国版本等旧功能仍在代码中，模块1不删除。

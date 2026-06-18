@@ -94,9 +94,10 @@ class UnifiedConfigTest(unittest.TestCase):
         (self.root / "config.json").write_text("{broken", encoding="utf-8")
 
         config = load_config(self.root)
-        backups = list(self.root.glob("config.json.invalid.*.bak"))
+        backups = list((self.root / "backups").glob("config.json.invalid.*.bak"))
 
         self.assertTrue(backups)
+        self.assertFalse(list(self.root.glob("config.json.invalid.*.bak")))
         self.assertTrue(config["no_publish"])
         self.assertTrue(config["_configWarnings"])
 
@@ -205,12 +206,13 @@ class UnifiedConfigTest(unittest.TestCase):
         second_payload["user"]["category"] = "凉鞋"
         second = save_config(self.root, second_payload)
         saved = json.loads((self.root / "config.json").read_text(encoding="utf-8"))
-        backups = list(self.root.glob("config.json.bak"))
+        backups = list((self.root / "backups").glob("config.json.bak"))
 
         self.assertEqual(first["user"]["category"], "运动鞋")
         self.assertEqual(second["user"]["category"], "凉鞋")
         self.assertEqual(saved["user"]["category"], "凉鞋")
         self.assertTrue(backups)
+        self.assertFalse((self.root / "config.json.bak").exists())
 
     def test_invalid_save_does_not_overwrite_existing_config(self):
         save_config(self.root, self.valid_payload())
@@ -265,7 +267,7 @@ class UnifiedConfigTest(unittest.TestCase):
         self.assertEqual(report["source_version"], 0)
         self.assertEqual(report["target_version"], 1)
         self.assertIn("user.max_weight_kg", report["changed_fields"])
-        self.assertEqual(migrated["user"]["run_mode"], "collect_to_box")
+        self.assertEqual(migrated["user"]["run_mode"], "simulation")
         self.assertEqual(migrated["user"]["max_weight_kg"], 1.5)
         self.assertTrue(migrated["advanced"]["no_publish"])
 
@@ -281,6 +283,72 @@ class UnifiedConfigTest(unittest.TestCase):
         self.assertTrue(config["collect_to_box_only"])
         self.assertNotEqual(config["user"]["run_mode"], "publish")
 
+    def test_invalid_structured_versions_are_backed_up_and_normalized(self):
+        for value in ("abc", {}, [], None, True):
+            with self.subTest(version=value):
+                root = Path(tempfile.mkdtemp())
+                payload = self.valid_payload()
+                if value is None:
+                    payload.pop("version", None)
+                else:
+                    payload["version"] = value
+                (root / "config.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+                report = migrate_config_file(root)
+                config = load_config(root)
+
+                self.assertTrue(report["migrated"])
+                self.assertEqual(config["version"], 1)
+                self.assertTrue(report["backup_path"])
+                self.assertEqual(Path(report["backup_path"]).parent, root / "backups")
+                self.assertTrue(report["warnings"])
+
+    def test_numeric_string_version_is_accepted_without_migration(self):
+        self.root.mkdir(parents=True, exist_ok=True)
+        payload = self.valid_payload()
+        payload["version"] = "1"
+        (self.root / "config.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+        report = migrate_config_file(self.root)
+
+        self.assertFalse(report["migrated"])
+        self.assertFalse(report["backup_path"])
+        self.assertEqual(load_config(self.root)["version"], 1)
+
+    def test_advanced_core_safety_fields_cannot_be_disabled(self):
+        for field in ("no_publish", "collect_to_box_only", "safety_checks_enabled", "enable_dedupe", "enable_risk_filter", "enable_title_clean"):
+            with self.subTest(field=field):
+                payload = self.valid_payload()
+                payload["advanced"][field] = False
+
+                result = validate_config(payload)
+
+                self.assertFalse(result["valid"])
+                self.assertIn("advanced.%s" % field, [item["field"] for item in result["errors"]])
+
+    def test_legacy_run_mode_migration_rules(self):
+        cases = [
+            ({"mode": "mock"}, "simulation"),
+            ({"mode": "dry_run"}, "simulation"),
+            ({"mode": "simulation"}, "simulation"),
+            ({"dry_run_collect": True, "mode": "real"}, "simulation"),
+            ({"dry_run_collect": "true", "mode": "real"}, "simulation"),
+            ({"mode": "real"}, "collect_to_box"),
+            ({"mode": "collect_to_box"}, "collect_to_box"),
+            ({"dry_run_collect": False, "collect_to_box_only": True}, "collect_to_box"),
+            ({"dry_run_collect": "false", "collect_to_box_only": "true"}, "collect_to_box"),
+            ({"mode": "publish"}, "simulation"),
+            ({"publish_enabled": True, "mode": "real"}, "simulation"),
+            ({"dry_run_collect": "maybe", "mode": "real"}, "collect_to_box"),
+        ]
+        for legacy, expected in cases:
+            with self.subTest(legacy=legacy):
+                payload = {"keywords": ["鞋"], **legacy}
+                migrated = validate_config(payload)["normalized_config"]
+
+                self.assertEqual(migrated["user"]["run_mode"], expected)
+                self.assertTrue(migrated["advanced"]["no_publish"])
+
     def test_reset_and_export_safe_config(self):
         save_config(self.root, self.valid_payload())
         reset = reset_config(self.root)
@@ -288,6 +356,9 @@ class UnifiedConfigTest(unittest.TestCase):
 
         self.assertEqual(reset["user"]["run_mode"], "simulation")
         self.assertEqual(safe["advanced"]["browser_user_data_dir"], "<local-path>")
+        self.assertIn("platform", safe["system"])
+        self.assertIn("python_version", safe["system"])
+        self.assertNotIn("chrome_path_detected", safe["system"])
         self.assertNotIn("legacy", safe)
 
     def test_legacy_settings_can_seed_new_config(self):
@@ -337,6 +408,7 @@ class UnifiedConfigTest(unittest.TestCase):
         self.assertTrue(first["migrated"])
         self.assertTrue(first["backup_path"])
         self.assertTrue(Path(first["backup_path"]).exists())
+        self.assertEqual(Path(first["backup_path"]).parent, self.root / "backups")
         self.assertFalse(second["migrated"])
         self.assertEqual(load_config(self.root)["chrome_debug_port"], 9333)
 
@@ -348,7 +420,7 @@ class UnifiedConfigTest(unittest.TestCase):
 
         self.assertTrue(result["migrated"])
         self.assertEqual(load_config(self.root)["chrome_debug_port"], 9555)
-        self.assertTrue(list(self.root.glob("config.json.invalid.*.bak")))
+        self.assertTrue(list((self.root / "backups").glob("config.json.invalid.*.bak")))
 
     def test_missing_config_can_be_seeded_from_settings_once(self):
         first = migrate_config_file(self.root, settings={
@@ -377,11 +449,22 @@ class UnifiedConfigTest(unittest.TestCase):
     def test_export_safe_config_redacts_sensitive_unknown_fields(self):
         payload = self.valid_payload()
         payload["advanced"]["api_key"] = "secret"
+        payload["system"] = {
+            "platform": "Darwin",
+            "python_version": "3.9.6",
+            "chrome_detected": True,
+            "chrome_path_detected": "/Users/example/Profile",
+            "token": "secret-token",
+            "api_key": "secret-key",
+        }
 
         result = validate_config(payload)
         safe = export_safe_config(result["normalized_config"])
 
         self.assertNotIn("secret", json.dumps(safe, ensure_ascii=False))
+        self.assertIn("platform", safe["system"])
+        self.assertNotIn("chrome_path_detected", safe["system"])
+        self.assertNotIn("token", safe["system"])
 
 
 if __name__ == "__main__":

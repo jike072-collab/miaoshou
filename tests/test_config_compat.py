@@ -153,7 +153,7 @@ class ConfigCompatibilityTest(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["config"]["user"]["category"], "凉鞋")
         self.assertEqual(payload["config"]["user"]["keywords"], ["凉鞋"])
-        self.assertEqual(payload["config"]["system"], {})
+        self.assertIn("platform", payload["config"]["system"])
         self.assertEqual(app.DB.setting("automation.mode"), "dry_run")
 
     def test_config_get_api_returns_safe_config_shape(self):
@@ -168,7 +168,7 @@ class ConfigCompatibilityTest(unittest.TestCase):
         self.assertEqual(payload["config"]["version"], 1)
         self.assertIn("user", payload["config"])
         self.assertIn("advanced", payload["config"])
-        self.assertEqual(payload["config"]["system"], {})
+        self.assertIn("platform", payload["config"]["system"])
 
     def test_config_api_rejects_invalid_user_config_without_writing(self):
         save_config(self.root, {"keywords": ["鞋"], "target_count": 5})
@@ -206,6 +206,22 @@ class ConfigCompatibilityTest(unittest.TestCase):
         self.assertEqual(app.DB.setting("automation.cdp_port"), 9444)
         self.assertNotEqual(load_config(self.root)["system"]["platform"], "bad")
 
+    def test_advanced_config_api_rejects_core_safety_disable_without_sync(self):
+        save_config(self.root, {"keywords": ["鞋"], "target_count": 5})
+        app.DB.set_settings({"automation.cdp_port": 9222})
+        before_config = (self.root / "config.json").read_text(encoding="utf-8")
+        before_port = app.DB.setting("automation.cdp_port")
+
+        response = self.handler().route_post("/api/config/advanced", {
+            "values": {"cdp_port": 9444, "no_publish": False},
+        })
+
+        self.assertEqual(response["status"], HTTPStatus.BAD_REQUEST)
+        self.assertFalse(response["payload"]["ok"])
+        self.assertEqual(response["payload"]["errors"][0]["field"], "advanced.no_publish")
+        self.assertEqual((self.root / "config.json").read_text(encoding="utf-8"), before_config)
+        self.assertEqual(app.DB.setting("automation.cdp_port"), before_port)
+
     def test_settings_api_compat_maps_old_fields_without_deleting_new_config(self):
         save_config(self.root, {"keywords": ["运动鞋"], "category": "鞋类", "target_count": 5})
 
@@ -221,6 +237,22 @@ class ConfigCompatibilityTest(unittest.TestCase):
         self.assertEqual(config["user"]["keywords"], ["运动鞋"])
         self.assertEqual(config["user"]["run_mode"], "collect_to_box")
         self.assertEqual(app.DB.setting("automation.mode"), "live")
+
+    def test_settings_api_does_not_directly_write_mirrored_config_keys(self):
+        save_config(self.root, {"keywords": ["运动鞋"], "category": "鞋类", "target_count": 5})
+
+        response = self.handler().route_post("/api/settings", {
+            "automation.cdp_port": 9555,
+            "automation.chrome_profile_dir": "data/old-profile",
+            "image.timeout": 77,
+        })
+
+        config = load_config(self.root)
+        self.assertEqual(response["status"], HTTPStatus.OK)
+        self.assertEqual(config["advanced"]["cdp_port"], 9555)
+        self.assertEqual(app.DB.setting("automation.cdp_port"), 9555)
+        self.assertEqual(app.DB.setting("automation.chrome_profile_dir"), "data/old-profile")
+        self.assertEqual(app.DB.setting("image.timeout"), 77)
 
 
 if __name__ == "__main__":

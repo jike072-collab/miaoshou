@@ -25,7 +25,7 @@ from lib.evaluation import evaluate_candidate, evaluation_status
 from lib.image_inspector import analyze_candidate_images, make_image_record_payload
 from lib.image_gateway import ImageGatewayError, generate
 from lib.keychain import get_secret, set_secret
-from lib.local_config import ConfigValidationError, assert_real_pipeline_safety, config_error_response, config_response, config_status, ensure_local_runtime, get_config_value, load_config, load_or_create_token, merge_config_sources, migrate_config_file, update_config
+from lib.local_config import ConfigValidationError, assert_real_pipeline_safety, config_error_response, config_response, config_status, ensure_local_runtime, get_config_value, load_config, load_or_create_token, migrate_config_file, update_config
 from lib.prompts import PRESETS, build_prompts
 from lib.real1688_adapter import Real1688Adapter, SOURCING_ACTIVE_STATUSES
 from lib.real_miaoshou_adapter import RealMiaoshouAdapter
@@ -212,7 +212,7 @@ def initialize():
     SOURCING.precheck_callback = lambda candidate_ids: precheck_candidates(candidate_ids)
     MIAOSHOU.candidate_summary = lambda candidate: candidate_summary(candidate)
     ASSET_DIR.mkdir(parents=True, exist_ok=True)
-    apply_config_to_settings()
+    sync_settings_from_config()
     DB.migrate_products_json(DATA_DIR / "products.json")
     DB.execute("UPDATE automation_runs SET status='queued',error='服务重启后等待恢复' WHERE status IN ('running','preparing')")
     DB.execute("UPDATE generation_jobs SET status='queued',error='服务重启后等待恢复' WHERE status='running'")
@@ -220,20 +220,6 @@ def initialize():
 
 def workbench_config():
     return load_config(DATA_DIR)
-
-
-def apply_config_to_settings(config=None):
-    config = config or workbench_config()
-    DB.set_settings({
-        "automation.mode": "dry_run" if get_config_value("user.run_mode", "simulation", config=config) == "simulation" else "live",
-        "automation.cdp_port": int(config.get("chrome_debug_port") or 9222),
-        "automation.chrome_profile_dir": config.get("chrome_profile_dir") or "data/chrome-profile",
-        "automation.alibaba_url": get_config_value("advanced.alibaba_url", "https://www.1688.com/", config=config),
-        "automation.miaoshou_url": get_config_value("advanced.miaoshou_url", "https://erp.91miaoshou.com/", config=config),
-        "automation.node_path": DB.setting("automation.node_path", ""),
-        "automation.plugin_extension_id": DB.setting("automation.plugin_extension_id", ""),
-    })
-    return config
 
 
 def sync_settings_from_config(config=None):
@@ -246,7 +232,10 @@ def sync_settings_from_config(config=None):
         "automation.alibaba_url": get_config_value("advanced.alibaba_url", "https://www.1688.com/", config=config),
         "automation.miaoshou_url": get_config_value("advanced.miaoshou_url", "https://erp.91miaoshou.com/", config=config),
         "automation.plugin_unpack_dir": get_config_value("advanced.plugin_unpack_dir", DB.setting("automation.plugin_unpack_dir", ""), config=config),
-        "automation.plugin_extension_id": get_config_value("advanced.plugin_id", DB.setting("automation.plugin_extension_id", ""), config=config),
+        "automation.plugin_extension_id": get_config_value("advanced.plugin_id", "", config=config),
+        "image.base_url": get_config_value("advanced.image_service_url", "", config=config),
+        "image.timeout": get_config_value("advanced.image_service_timeout_seconds", 30, config=config),
+        "image.retries": get_config_value("advanced.step_retry_count", 2, config=config),
         "automation.node_path": DB.setting("automation.node_path", ""),
         "automation.collection_recipe": DB.setting("automation.collection_recipe", []),
         "automation.link_collection_recipe": DB.setting("automation.link_collection_recipe", []),
@@ -256,10 +245,51 @@ def sync_settings_from_config(config=None):
     return payload
 
 
-def settings_to_config_bridge():
-    settings = DB.settings()
-    merged = merge_config_sources(legacy_config=load_config(DATA_DIR), settings=settings)
-    return merged
+apply_config_to_settings = sync_settings_from_config
+
+
+CONFIG_MIRRORED_SETTINGS_KEYS = {
+    "automation.mode",
+    "automation.cdp_port",
+    "automation.chrome_profile_dir",
+    "automation.chrome_path",
+    "automation.alibaba_url",
+    "automation.miaoshou_url",
+    "automation.plugin_extension_id",
+    "image.base_url",
+    "image.timeout",
+    "image.retries",
+    "market.target_margin_pct",
+}
+
+LEGACY_SETTINGS_DIRECT_PREFIXES = ("evaluation.", "automation.", "image.", "text.", "market.")
+LEGACY_SETTINGS_DIRECT_EXCLUDE = CONFIG_MIRRORED_SETTINGS_KEYS | {
+    "category",
+    "keywords",
+    "target_count",
+    "candidate_limit",
+    "min_price",
+    "max_price",
+    "purchase_price_min",
+    "purchase_price_max",
+    "weight_limit",
+    "max_weight_kg",
+    "profit_margin",
+    "minimum_profit_margin",
+    "auto_season_check",
+    "image_mode",
+    "image_strategy",
+    "run_mode",
+    "system",
+}
+
+
+def legacy_settings_direct_payload(values):
+    return {
+        key: value
+        for key, value in values.items()
+        if key.startswith(LEGACY_SETTINGS_DIRECT_PREFIXES) and key not in LEGACY_SETTINGS_DIRECT_EXCLUDE
+    }
 
 
 def local_status():
@@ -4814,14 +4844,19 @@ class AppHandler(BaseHTTPRequestHandler):
             if settings_patch:
                 config = update_config(DATA_DIR, settings_patch, "user")
                 sync_settings_from_config(config)
+            advanced_patch = self.settings_payload_to_advanced_config_patch(values)
+            if advanced_patch:
+                config = update_config(DATA_DIR, advanced_patch, "advanced")
+                sync_settings_from_config(config)
             box_recipe = values.get("automation.miaoshou_box_recipe")
             if box_recipe is not None:
                 AUTOMATION.ensure_publish_allowed(box_recipe, "妙手采集箱安全配方")
             recipe = values.get("automation.publish_recipe")
             if recipe is not None:
                 AUTOMATION.ensure_publish_allowed(recipe, "发布动作配方")
-            allowed_prefixes = ("evaluation.", "automation.", "image.", "text.", "market.")
-            DB.set_settings({key: value for key, value in values.items() if key.startswith(allowed_prefixes)})
+            direct_settings = legacy_settings_direct_payload(values)
+            if direct_settings:
+                DB.set_settings(direct_settings)
             config = workbench_config()
             sync_settings_from_config(config)
             return self.send_json({"ok": True, "deprecated": True, "config": config_response(config)["config"], "warnings": [{"field": "/api/settings", "message": "/api/settings已弃用，后续请使用/api/config", "reason": "/api/settings已弃用，后续请使用/api/config", "value": "", "allowed": "/api/config"}]})
@@ -4882,6 +4917,27 @@ class AppHandler(BaseHTTPRequestHandler):
             patch["run_mode"] = "simulation"
         elif values.get("automation.mode") in ("live", "collect_to_box"):
             patch["run_mode"] = "collect_to_box"
+        if "market.target_margin_pct" in values:
+            patch["minimum_profit_margin"] = float(values["market.target_margin_pct"]) / 100
+        return patch
+
+    @staticmethod
+    def settings_payload_to_advanced_config_patch(values):
+        patch = {}
+        mapping = {
+            "automation.chrome_path": "browser_path",
+            "automation.chrome_profile_dir": "browser_user_data_dir",
+            "automation.cdp_port": "cdp_port",
+            "automation.alibaba_url": "alibaba_url",
+            "automation.miaoshou_url": "miaoshou_url",
+            "automation.plugin_extension_id": "plugin_id",
+            "image.base_url": "image_service_url",
+            "image.timeout": "image_service_timeout_seconds",
+            "image.retries": "step_retry_count",
+        }
+        for old_key, new_key in mapping.items():
+            if old_key in values:
+                patch[new_key] = values[old_key]
         return patch
 
     def do_DELETE(self):

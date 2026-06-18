@@ -67,6 +67,10 @@
 
 - `no_publish` 必须为 `true`
 - `collect_to_box_only` 必须为 `true`
+- `safety_checks_enabled` 必须为 `true`
+- `enable_dedupe` 必须为 `true`
+- `enable_risk_filter` 必须为 `true`
+- `enable_title_clean` 必须为 `true`
 - `run_mode` 不能是 `publish`
 - 配置层不会保存账号密码、Cookie、Workbench token 或 API Key
 
@@ -77,7 +81,6 @@
 - `platform`
 - `python_version`
 - `chrome_detected`
-- `chrome_path_detected`
 - `cdp_available`
 - `alibaba_logged_in`
 - `miaoshou_logged_in`
@@ -85,6 +88,8 @@
 - `last_environment_check_at`
 
 普通 `save_config()` 不采用用户传入的 `system` 值，避免把登录态、检测态或本机状态当作用户配置保存。
+
+API 只安全导出 `platform`、`python_version`、`chrome_detected`、`cdp_available`、`alibaba_logged_in`、`miaoshou_logged_in`、`plugin_detected`、`last_environment_check_at`。完整 Chrome 路径、浏览器 Profile、Cookie、token、密码和 API Key 不返回。
 
 ## 校验与恢复
 
@@ -97,7 +102,7 @@
 
 错误和警告都包含字段路径、原因、当前值和合法范围。保存时若有错误会抛出 `ValueError`，不会覆盖原配置。
 
-配置读取时如果发现 JSON 损坏、空文件或无法读取，会备份原文件并加载安全默认配置。保存时先写临时文件，再原子替换，并保留最近一次 `config.json.bak`。
+配置读取时如果发现 JSON 损坏、空文件或无法读取，会备份原文件到 `data/backups/` 并加载安全默认配置。保存时先写临时文件，再原子替换，并在 `data/backups/config.json.bak` 保留最近一次备份。
 
 ## 旧配置兼容
 

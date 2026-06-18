@@ -8,7 +8,8 @@
 | --- | --- | --- |
 | `data/config.example.json` | 可提交的示例配置 | 已跟踪 |
 | `data/config.json` | 本机真实配置 | 被 `.gitignore` 忽略 |
-| `data/config.json.bak` | 最近一次保存前备份 | 被 `data/config.json` 规则覆盖忽略 |
+| `data/backups/config.json.bak` | 最近一次保存前备份 | 被 `.gitignore` 忽略 |
+| `data/backups/config.json.*.bak` | 损坏或无效配置备份 | 被 `.gitignore` 忽略 |
 | `data/backups/config-before-migration-*.json` | 旧配置迁移前备份 | 被 `.gitignore` 忽略 |
 
 首次安装时可以从示例配置开始：
@@ -93,6 +94,10 @@ cp data/config.example.json data/config.json
 
 - `no_publish=true`
 - `collect_to_box_only=true`
+- `safety_checks_enabled=true`
+- `enable_dedupe=true`
+- `enable_risk_filter=true`
+- `enable_title_clean=true`
 - 不能出现 `publish` 运行模式
 
 ## 系统字段
@@ -102,7 +107,6 @@ cp data/config.example.json data/config.json
 | `platform` | 自动检测 | 操作系统 |
 | `python_version` | 自动检测 | Python 版本 |
 | `chrome_detected` | 自动检测 | 是否检测到 Chrome |
-| `chrome_path_detected` | 自动检测 | 检测到的 Chrome 路径 |
 | `cdp_available` | 自动检测 | CDP 是否可连接 |
 | `alibaba_logged_in` | 自动检测 | 1688 登录状态 |
 | `miaoshou_logged_in` | 自动检测 | 妙手登录状态 |
@@ -110,6 +114,8 @@ cp data/config.example.json data/config.json
 | `last_environment_check_at` | 自动检测 | 最近检测时间 |
 
 普通保存接口和高级保存接口都不能修改 `system.*`。
+
+`/api/config` 只返回安全 system 字段：`platform`、`python_version`、`chrome_detected`、`cdp_available`、`alibaba_logged_in`、`miaoshou_logged_in`、`plugin_detected`、`last_environment_check_at`。完整本机路径、Cookie、token、密码和 API Key 不会返回。
 
 ## 运行模式
 
@@ -138,9 +144,12 @@ cp data/config.example.json data/config.json
 - 旧平铺 `keywords` 迁移到 `user.keywords`。
 - 旧 `max_weight_g` 按克转为 `user.max_weight_kg`。
 - 旧利润率百分数转为小数，例如 `25` 转为 `0.25`。
-- `dry_run_collect=true` 转为 `simulation`。
+- `mode=mock/dry_run/simulation` 或 `dry_run_collect=true` 转为 `simulation`。
+- `mode=real/collect_to_box` 且没有模拟冲突时转为 `collect_to_box`。
+- `dry_run_collect=false` 且 `collect_to_box_only=true` 转为 `collect_to_box`。
 - 含义不明确的 `real_mode`、`live_mode` 转为 `simulation` 并产生警告。
-- `mode=publish`、`publish_enabled=true` 会被拒绝或降级，不会生成发布模式。
+- `mode=publish`、`publish_enabled=true` 会被拒绝并降级到 `simulation`，不会生成发布模式。
+- `true`、`1`、`"true"`、`"1"` 视为 true；`false`、`0`、`"false"`、`"0"` 视为 false；其他旧布尔值产生 warning。
 - 未识别字段保留在 `legacy` 区或 settings 兼容镜像，并产生 warning。
 
 迁移前会备份旧文件到：
@@ -154,7 +163,7 @@ data/backups/config-before-migration-YYYYMMDDHHMMSS.json
 当 `data/config.json` 缺失、为空、JSON 损坏或字段非法时：
 
 1. 程序不会直接崩溃。
-2. 损坏文件会备份为 `config.json.invalid.*.bak` 或 `config.json.rejected.*.bak`。
+2. 损坏文件会备份到 `data/backups/config.json.invalid.*.bak` 或 `data/backups/config.json.rejected.*.bak`。
 3. 当前进程加载安全默认配置。
 4. API 返回明确 warnings/errors。
 5. 不会自动覆盖原损坏文件，需用户确认保存后再写入。
@@ -164,7 +173,7 @@ data/backups/config-before-migration-YYYYMMDDHHMMSS.json
 1. 校验输入。
 2. 写临时文件。
 3. 原子替换 `data/config.json`。
-4. 保留最近一次 `config.json.bak`。
+4. 保留最近一次 `data/backups/config.json.bak`。
 5. 同步必要 settings 兼容字段。
 
 ## 敏感配置

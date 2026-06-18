@@ -2,12 +2,16 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+.env.*
 data/assets/*
 !data/assets/.gitkeep
 data/*.db
 data/*.db-*
 data/config.json
+data/config.json.bak
+data/config.json.*.bak
 data/backups/
+data/backups/**
 data/workbench.token
 data/logs/
 data/screenshots/

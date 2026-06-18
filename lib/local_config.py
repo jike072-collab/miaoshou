@@ -40,6 +40,25 @@ IMAGE_STRATEGIES = ("original", "inspect_and_fix", "regenerate")
 RUN_MODES = ("simulation", "collect_to_box")
 DEDUP_SCOPES = ("local", "history", "all")
 SENSITIVE_FIELD_PATTERN = re.compile(r"(api[_-]?key|authorization|token|cookie|password|passwd|secret)", re.IGNORECASE)
+LOCKED_TRUE_ADVANCED_FIELDS = (
+    "no_publish",
+    "collect_to_box_only",
+    "safety_checks_enabled",
+    "enable_dedupe",
+    "enable_risk_filter",
+    "enable_title_clean",
+)
+SAFE_SYSTEM_FIELDS = (
+    "platform",
+    "python_version",
+    "chrome_detected",
+    "cdp_available",
+    "alibaba_logged_in",
+    "miaoshou_logged_in",
+    "plugin_detected",
+    "last_environment_check_at",
+)
+LEGACY_RUN_MODE_FIELDS = ("dry_run_collect", "collect_to_box_only", "mode", "real_mode", "live_mode", "publish_enabled")
 
 DEFAULT_CONFIG = {
     "version": CONFIG_VERSION,
@@ -198,6 +217,10 @@ def config_path(data_dir):
     return Path(data_dir) / "config.json"
 
 
+def backup_dir_for_config(data_dir):
+    return Path(data_dir) / "backups"
+
+
 def token_path(data_dir):
     return Path(data_dir) / "workbench.token"
 
@@ -246,7 +269,9 @@ def _atomic_write_json(path, payload):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
-        backup = path.with_name(path.name + ".bak")
+        backup_dir = backup_dir_for_config(path.parent)
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup = backup_dir / (path.name + ".bak")
         shutil.copyfile(path, backup)
     temp = path.with_name(".%s.tmp" % path.name)
     temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -258,7 +283,9 @@ def _backup_problem_config(path, label):
     if not path.exists():
         return ""
     stamp = time.strftime("%Y%m%d%H%M%S")
-    backup = path.with_name("%s.%s.%s.bak" % (path.name, label, stamp))
+    backup_dir = backup_dir_for_config(path.parent)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / ("%s.%s.%s.bak" % (path.name, label, stamp))
     shutil.copyfile(path, backup)
     return str(backup)
 
@@ -268,7 +295,7 @@ def backup_config_for_migration(data_dir, source_path=None):
     source_path = Path(source_path or config_path(data_dir))
     if not source_path.exists():
         return ""
-    backup_dir = data_dir / "backups"
+    backup_dir = backup_dir_for_config(data_dir)
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d%H%M%S")
     backup = backup_dir / ("config-before-migration-%s.json" % stamp)
@@ -285,14 +312,32 @@ def _to_string(value):
 def _to_bool(value, field, errors, default=False):
     if isinstance(value, bool):
         return value
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value in (0, 1):
+            return bool(value)
     if isinstance(value, str):
         normalized = value.strip().lower()
-        if normalized in ("true", "1", "yes", "y", "on"):
+        if normalized in ("true", "1"):
             return True
-        if normalized in ("false", "0", "no", "n", "off"):
+        if normalized in ("false", "0"):
             return False
     errors.append(_issue(field, "必须是布尔值", value, "true 或 false"))
     return default
+
+
+def _parse_legacy_bool(value, field, warnings):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and not isinstance(value, bool) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in ("true", "1"):
+            return True
+        if normalized in ("false", "0"):
+            return False
+    warnings.append(_issue(field, "旧布尔字段含义不明确，已按安全默认处理", value, "true/false/1/0"))
+    return None
 
 
 def _to_int(value, field, errors, default, min_value=None, max_value=None):
@@ -317,6 +362,41 @@ def _to_int(value, field, errors, default, min_value=None, max_value=None):
         errors.append(_issue(field, "超过最大值", value, _range_label(min_value, max_value)))
         return default
     return parsed
+
+
+def _parse_config_version(value, warnings, field="version"):
+    if value is None:
+        warnings.append(_issue(field, "缺少配置版本，已按当前版本处理", value, CONFIG_VERSION))
+        return CONFIG_VERSION
+    if isinstance(value, bool):
+        warnings.append(_issue(field, "配置版本不能是布尔值，已按当前版本处理", value, CONFIG_VERSION))
+        return CONFIG_VERSION
+    if isinstance(value, int):
+        if value == CONFIG_VERSION:
+            return value
+        warnings.append(_issue(field, "配置版本不受支持，已按当前版本处理", value, CONFIG_VERSION))
+        return CONFIG_VERSION
+    if isinstance(value, str):
+        text = value.strip()
+        if re.fullmatch(r"\d+", text):
+            parsed = int(text, 10)
+            if parsed == CONFIG_VERSION:
+                return parsed
+        warnings.append(_issue(field, "配置版本格式无效，已按当前版本处理", value, CONFIG_VERSION))
+        return CONFIG_VERSION
+    warnings.append(_issue(field, "配置版本类型无效，已按当前版本处理", value, CONFIG_VERSION))
+    return CONFIG_VERSION
+
+
+def _is_current_config_version(value):
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return value == CONFIG_VERSION
+    if isinstance(value, str):
+        text = value.strip()
+        return bool(re.fullmatch(r"\d+", text)) and int(text, 10) == CONFIG_VERSION
+    return False
 
 
 def _to_float(value, field, errors, default, min_value=None, max_value=None, inclusive_min=True):
@@ -416,6 +496,20 @@ def _set_nested(config, path, value, changed_fields):
         changed_fields.append(path)
 
 
+def _legacy_has_simulation_conflict(flat):
+    dry_value = flat.get("dry_run_collect") if isinstance(flat, dict) else None
+    dry = _parse_legacy_bool(dry_value, "dry_run_collect", []) if "dry_run_collect" in (flat or {}) else None
+    mode = _to_string((flat or {}).get("mode")).lower()
+    return dry is True or mode in ("mock", "dry_run", "simulation")
+
+
+def _legacy_publish_requested(flat):
+    flat = flat or {}
+    mode = _to_string(flat.get("mode")).lower()
+    publish_enabled = _parse_legacy_bool(flat.get("publish_enabled"), "publish_enabled", []) if "publish_enabled" in flat else None
+    return mode == "publish" or publish_enabled is True
+
+
 def _coerce_margin(value):
     try:
         parsed = float(value)
@@ -426,7 +520,7 @@ def _coerce_margin(value):
     return parsed
 
 
-def _apply_legacy_field(config, key, value, changed_fields, ignored_fields, warnings):
+def _apply_legacy_field(config, key, value, changed_fields, ignored_fields, warnings, legacy_values=None):
     if key in ("category", "keywords", "target_count", "candidate_limit", "purchase_price_min", "purchase_price_max", "max_weight_kg", "auto_season_check", "image_strategy"):
         _set_nested(config, LEGACY_FIELD_MAPPINGS[key][0], value, changed_fields)
         return True
@@ -465,30 +559,52 @@ def _apply_legacy_field(config, key, value, changed_fields, ignored_fields, warn
         _set_nested(config, "advanced.%s" % key, value, changed_fields)
         return True
     if key in ("dry_run_collect", "collect_to_box_only", "mode", "real_mode", "live_mode", "publish_enabled", "no_publish"):
-        return _apply_legacy_run_mode(config, key, value, changed_fields, ignored_fields, warnings)
+        return _apply_legacy_run_mode(config, key, value, changed_fields, ignored_fields, warnings, legacy_values or {})
     ignored_fields.append(key)
     return False
 
 
-def _apply_legacy_run_mode(config, key, value, changed_fields, ignored_fields, warnings):
+def _apply_legacy_run_mode(config, key, value, changed_fields, ignored_fields, warnings, legacy_values=None):
+    legacy_values = legacy_values or {}
     if key == "dry_run_collect":
-        if bool(value):
+        parsed = _parse_legacy_bool(value, key, warnings)
+        if parsed is True:
             _set_nested(config, "user.run_mode", "simulation", changed_fields)
+        elif parsed is False and _parse_legacy_bool(legacy_values.get("collect_to_box_only"), "collect_to_box_only", []) is True:
+            if _legacy_publish_requested(legacy_values):
+                _set_nested(config, "user.run_mode", "simulation", changed_fields)
+                warnings.append(_issue("user.run_mode", "旧配置请求发布，已拒绝并进入 simulation", value, RUN_MODES))
+            else:
+                _set_nested(config, "user.run_mode", "collect_to_box", changed_fields)
         return True
     if key == "collect_to_box_only":
-        if bool(value) and config["user"].get("run_mode") != "simulation":
-            _set_nested(config, "user.run_mode", "collect_to_box", changed_fields)
+        parsed = _parse_legacy_bool(value, key, warnings)
+        dry = _parse_legacy_bool(legacy_values.get("dry_run_collect"), "dry_run_collect", []) if "dry_run_collect" in legacy_values else None
+        if parsed is True and dry is False:
+            if _legacy_publish_requested(legacy_values):
+                _set_nested(config, "user.run_mode", "simulation", changed_fields)
+                warnings.append(_issue("user.run_mode", "旧配置请求发布，已拒绝并进入 simulation", value, RUN_MODES))
+            else:
+                _set_nested(config, "user.run_mode", "collect_to_box", changed_fields)
+        elif parsed is False:
+            warnings.append(_issue("advanced.collect_to_box_only", "旧配置试图关闭采集箱限制，已保持安全模式", value, "true"))
         return True
     if key == "mode":
         mode = _to_string(value).lower()
         if mode in ("mock", "dry_run", "simulation"):
             _set_nested(config, "user.run_mode", "simulation", changed_fields)
         elif mode in ("real", "collect_to_box"):
-            if config["user"].get("run_mode") != "simulation":
+            if _legacy_publish_requested(legacy_values):
+                _set_nested(config, "user.run_mode", "simulation", changed_fields)
+                warnings.append(_issue("user.run_mode", "旧配置请求发布，已拒绝并进入 simulation", value, RUN_MODES))
+            elif _legacy_has_simulation_conflict(legacy_values):
+                _set_nested(config, "user.run_mode", "simulation", changed_fields)
+                warnings.append(_issue("user.run_mode", "旧运行模式与模拟配置冲突，已进入 simulation", value, RUN_MODES))
+            else:
                 _set_nested(config, "user.run_mode", "collect_to_box", changed_fields)
         elif mode == "publish":
-            _set_nested(config, "user.run_mode", "collect_to_box", changed_fields)
-            warnings.append(_issue("user.run_mode", "旧 mode=publish 已被拒绝并降级为 collect_to_box", value, RUN_MODES))
+            _set_nested(config, "user.run_mode", "simulation", changed_fields)
+            warnings.append(_issue("user.run_mode", "旧 mode=publish 已被拒绝并降级为 simulation", value, RUN_MODES))
         else:
             _set_nested(config, "user.run_mode", "simulation", changed_fields)
             warnings.append(_issue("user.run_mode", "旧 mode 含义不明确，已进入 simulation", value, RUN_MODES))
@@ -500,7 +616,9 @@ def _apply_legacy_run_mode(config, key, value, changed_fields, ignored_fields, w
         return True
     if key == "publish_enabled":
         ignored_fields.append(key)
-        warnings.append(_issue("user.run_mode", "publish_enabled=true 被拒绝，当前版本禁止发布模式", value, RUN_MODES))
+        parsed = _parse_legacy_bool(value, key, warnings)
+        if parsed is True:
+            warnings.append(_issue("user.run_mode", "publish_enabled=true 被拒绝，当前版本禁止发布模式", value, RUN_MODES))
         _set_nested(config, "user.run_mode", "simulation", changed_fields)
         return True
     if key == "no_publish":
@@ -564,7 +682,7 @@ def migrate_legacy_config(values):
     if is_structured:
         source_version = values.get("version", CONFIG_VERSION)
         config["documentation"] = _to_string(values.get("documentation")) or CONFIG_DOC
-        config["version"] = values.get("version", CONFIG_VERSION)
+        config["version"] = _parse_config_version(values.get("version"), warnings)
         config["user"].update(values.get("user") or {})
         config["advanced"].update(values.get("advanced") or {})
         legacy = deepcopy(values.get("legacy") or {})
@@ -581,7 +699,7 @@ def migrate_legacy_config(values):
         warnings.append(_issue("config", "检测到旧版平铺配置，已迁移到 version/user/advanced/system 结构", "legacy", "version 1"))
         for key, value in values.items():
             if key in LEGACY_FIELD_MAPPINGS or key in _legacy_source(values):
-                _apply_legacy_field(config, key, value, changed_fields, ignored_fields, warnings)
+                _apply_legacy_field(config, key, value, changed_fields, ignored_fields, warnings, values)
 
     for key, value in values.items():
         if key not in ("version", "documentation", "user", "advanced", "system", "legacy") and key not in _legacy_source(values):
@@ -614,12 +732,7 @@ def validate_config(config):
     normalized = _canonical_default()
     normalized["documentation"] = CONFIG_DOC
 
-    version = migrated.get("version", CONFIG_VERSION)
-    version_int = _to_int(version, "version", errors, CONFIG_VERSION, 1, CONFIG_VERSION)
-    if version_int != CONFIG_VERSION:
-        warnings.append(_issue("version", "配置版本已按当前版本处理", version, CONFIG_VERSION))
-        version_int = CONFIG_VERSION
-    normalized["version"] = version_int
+    normalized["version"] = _parse_config_version(migrated.get("version"), warnings)
 
     user = migrated.get("user") if isinstance(migrated.get("user"), dict) else {}
     advanced = migrated.get("advanced") if isinstance(migrated.get("advanced"), dict) else {}
@@ -717,12 +830,10 @@ def validate_config(config):
 
     for key in ("no_publish", "collect_to_box_only", "safety_checks_enabled", "enable_dedupe", "enable_risk_filter", "enable_title_clean", "enable_image_check", "enable_miaoshou_collect"):
         normalized["advanced"][key] = _to_bool(advanced.get(key, advanced_defaults[key]), "advanced.%s" % key, errors, advanced_defaults[key])
-    if normalized["advanced"]["no_publish"] is not True:
-        errors.append(_issue("advanced.no_publish", "当前版本必须保持 true，不能通过配置启用发布", advanced.get("no_publish"), "true"))
-        normalized["advanced"]["no_publish"] = True
-    if normalized["advanced"]["collect_to_box_only"] is not True:
-        errors.append(_issue("advanced.collect_to_box_only", "当前版本只允许进入妙手采集箱，必须保持 true", advanced.get("collect_to_box_only"), "true"))
-        normalized["advanced"]["collect_to_box_only"] = True
+    for key in LOCKED_TRUE_ADVANCED_FIELDS:
+        if normalized["advanced"][key] is not True:
+            errors.append(_issue("advanced.%s" % key, "当前版本必须保持 true，不能通过配置关闭核心安全能力" if key != "no_publish" else "当前版本必须保持 true，不能通过配置启用发布", advanced.get(key), "true"))
+            normalized["advanced"][key] = True
     normalized["advanced"]["per_run_item_limit"] = _to_int(advanced.get("per_run_item_limit", advanced_defaults["per_run_item_limit"]), "advanced.per_run_item_limit", errors, advanced_defaults["per_run_item_limit"], 1, MAX_SAFE_ITEMS_PER_RUN)
     normalized["advanced"]["per_keyword_page_limit"] = _to_int(advanced.get("per_keyword_page_limit", advanced_defaults["per_keyword_page_limit"]), "advanced.per_keyword_page_limit", errors, advanced_defaults["per_keyword_page_limit"], 1, MAX_SAFE_PAGES_PER_KEYWORD)
 
@@ -979,7 +1090,10 @@ def migrate_config_file(data_dir, settings=None, force=False):
     except (OSError, json.JSONDecodeError) as exc:
         backup = _backup_problem_config(path, "invalid")
         warnings.append(_issue("config.json", "旧配置无法读取，已使用 settings/default 迁移", str(exc), "有效 JSON 配置"))
-    structured = isinstance(payload, dict) and isinstance(payload.get("user"), dict) and int(payload.get("version") or 0) == CONFIG_VERSION
+    version_warnings = []
+    parsed_version = _parse_config_version(payload.get("version") if isinstance(payload, dict) else None, version_warnings) if payload else CONFIG_VERSION
+    warnings.extend(version_warnings)
+    structured = isinstance(payload, dict) and isinstance(payload.get("user"), dict) and parsed_version == CONFIG_VERSION and _is_current_config_version(payload.get("version"))
     settings_seed_available = bool(settings) and config_missing_before_init
     if structured and not force:
         if settings_seed_available:
@@ -1017,6 +1131,33 @@ def migrate_config_file(data_dir, settings=None, force=False):
             "source_version": payload.get("version"),
             "target_version": CONFIG_VERSION,
             "changed_fields": [],
+            "ignored_fields": [],
+            "warnings": warnings + result["warnings"],
+            "normalized_config": result["normalized_config"],
+            "backup_path": backup,
+        }
+    if isinstance(payload, dict) and (isinstance(payload.get("user"), dict) or isinstance(payload.get("advanced"), dict)):
+        if path.exists() and not backup:
+            backup = backup_config_for_migration(data_dir, path)
+        result = validate_config(payload)
+        if not result["valid"]:
+            return {
+                "migrated": False,
+                "source_version": payload.get("version"),
+                "target_version": CONFIG_VERSION,
+                "changed_fields": [],
+                "ignored_fields": [],
+                "warnings": warnings + result["warnings"],
+                "errors": result["errors"],
+                "normalized_config": result["normalized_config"],
+                "backup_path": backup,
+            }
+        _atomic_write_json(path, result["normalized_config"])
+        return {
+            "migrated": True,
+            "source_version": payload.get("version"),
+            "target_version": CONFIG_VERSION,
+            "changed_fields": ["version"],
             "ignored_fields": [],
             "warnings": warnings + result["warnings"],
             "normalized_config": result["normalized_config"],
@@ -1073,7 +1214,8 @@ def export_safe_config(config=None):
             advanced[key] = "<local-path>"
     for section in ("user", "advanced", "system"):
         _redact_sensitive_mapping(safe.get(section, {}))
-    safe["system"] = {}
+    system = safe.get("system") if isinstance(safe.get("system"), dict) else {}
+    safe["system"] = {key: system.get(key, DEFAULT_CONFIG["system"].get(key)) for key in SAFE_SYSTEM_FIELDS}
     safe.pop("legacy", None)
     return safe
 
