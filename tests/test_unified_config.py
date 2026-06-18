@@ -211,6 +211,7 @@ class UnifiedConfigTest(unittest.TestCase):
         self.assertEqual(first["user"]["category"], "运动鞋")
         self.assertEqual(second["user"]["category"], "凉鞋")
         self.assertEqual(saved["user"]["category"], "凉鞋")
+        self.assertNotIn("system", saved)
         self.assertTrue(backups)
         self.assertFalse((self.root / "config.json.bak").exists())
 
@@ -238,7 +239,7 @@ class UnifiedConfigTest(unittest.TestCase):
         saved = json.loads((self.root / "config.json").read_text(encoding="utf-8"))
 
         self.assertNotEqual(config["system"]["platform"], "Injected")
-        self.assertNotEqual(saved["system"]["python_version"], "0.0.0")
+        self.assertNotIn("system", saved)
         self.assertTrue(config["_configWarnings"])
 
     def test_legacy_flat_config_is_migrated_with_weight_kg_and_safe_mode(self):
@@ -353,6 +354,7 @@ class UnifiedConfigTest(unittest.TestCase):
         save_config(self.root, self.valid_payload())
         reset = reset_config(self.root)
         safe = export_safe_config(reset)
+        saved = json.loads((self.root / "config.json").read_text(encoding="utf-8"))
 
         self.assertEqual(reset["user"]["run_mode"], "simulation")
         self.assertEqual(safe["advanced"]["browser_user_data_dir"], "<local-path>")
@@ -360,6 +362,53 @@ class UnifiedConfigTest(unittest.TestCase):
         self.assertIn("python_version", safe["system"])
         self.assertNotIn("chrome_path_detected", safe["system"])
         self.assertNotIn("legacy", safe)
+        self.assertNotIn("system", saved)
+
+    def test_export_safe_config_preserves_trusted_runtime_system(self):
+        safe = export_safe_config(self.valid_payload(), trusted_system={
+            "platform": "Darwin",
+            "python_version": "3.11.9",
+            "chrome_detected": True,
+            "cdp_available": True,
+            "alibaba_logged_in": True,
+            "miaoshou_logged_in": True,
+            "plugin_detected": True,
+            "last_environment_check_at": "2026-06-18T10:00:00Z",
+        })
+
+        self.assertEqual(safe["system"]["platform"], "Darwin")
+        self.assertTrue(safe["system"]["chrome_detected"])
+        self.assertTrue(safe["system"]["alibaba_logged_in"])
+        self.assertTrue(safe["system"]["miaoshou_logged_in"])
+        self.assertTrue(safe["system"]["plugin_detected"])
+
+    def test_export_safe_config_uses_safe_defaults_without_runtime_system(self):
+        safe = export_safe_config(self.valid_payload())
+
+        self.assertIn("platform", safe["system"])
+        self.assertIn("python_version", safe["system"])
+        self.assertFalse(safe["system"]["chrome_detected"])
+        self.assertFalse(safe["system"]["cdp_available"])
+
+    def test_export_safe_config_filters_sensitive_runtime_system_fields(self):
+        safe = export_safe_config(self.valid_payload(), trusted_system={
+            "chrome_detected": True,
+            "token": "secret-token",
+            "cookie": "session-cookie",
+            "api_key": "secret-key",
+            "browser_user_data_dir": "/Users/example/Profile",
+            "chrome_path_detected": "/Applications/Google Chrome.app",
+        })
+        serialized = json.dumps(safe, ensure_ascii=False)
+
+        self.assertTrue(safe["system"]["chrome_detected"])
+        self.assertNotIn("token", safe["system"])
+        self.assertNotIn("cookie", safe["system"])
+        self.assertNotIn("api_key", safe["system"])
+        self.assertNotIn("browser_user_data_dir", safe["system"])
+        self.assertNotIn("chrome_path_detected", safe["system"])
+        self.assertNotIn("secret-token", serialized)
+        self.assertNotIn("/Users/example/Profile", serialized)
 
     def test_legacy_settings_can_seed_new_config(self):
         report = legacy_settings_to_config({
@@ -459,7 +508,7 @@ class UnifiedConfigTest(unittest.TestCase):
         }
 
         result = validate_config(payload)
-        safe = export_safe_config(result["normalized_config"])
+        safe = export_safe_config(result["normalized_config"], trusted_system=payload["system"])
 
         self.assertNotIn("secret", json.dumps(safe, ensure_ascii=False))
         self.assertIn("platform", safe["system"])

@@ -7,7 +7,9 @@ import io
 import json
 import mimetypes
 import os
+import platform
 import re
+import sys
 import threading
 import time
 import uuid
@@ -236,6 +238,7 @@ def sync_settings_from_config(config=None):
         "image.base_url": get_config_value("advanced.image_service_url", "", config=config),
         "image.timeout": get_config_value("advanced.image_service_timeout_seconds", 30, config=config),
         "image.retries": get_config_value("advanced.step_retry_count", 2, config=config),
+        "market.target_margin_pct": float(get_config_value("user.minimum_profit_margin", 0.2, config=config) or 0) * 100,
         "automation.node_path": DB.setting("automation.node_path", ""),
         "automation.collection_recipe": DB.setting("automation.collection_recipe", []),
         "automation.link_collection_recipe": DB.setting("automation.link_collection_recipe", []),
@@ -246,6 +249,31 @@ def sync_settings_from_config(config=None):
 
 
 apply_config_to_settings = sync_settings_from_config
+
+
+def get_runtime_system_status():
+    status = {
+        "platform": platform.system() or sys.platform,
+        "python_version": platform.python_version(),
+        "chrome_detected": False,
+        "cdp_available": False,
+        "alibaba_logged_in": False,
+        "miaoshou_logged_in": False,
+        "plugin_detected": False,
+        "last_environment_check_at": str(int(time.time())),
+    }
+    try:
+        preflight = AUTOMATION.preflight()
+        status.update({
+            "chrome_detected": bool(preflight.get("chromeInstalled")),
+            "cdp_available": bool(preflight.get("cdpConnected")),
+            "alibaba_logged_in": bool(preflight.get("alibabaLoginVerified")),
+            "miaoshou_logged_in": bool(preflight.get("miaoshouLoginVerified")),
+            "plugin_detected": bool(preflight.get("pluginVerified")),
+        })
+    except Exception:
+        pass
+    return status
 
 
 CONFIG_MIRRORED_SETTINGS_KEYS = {
@@ -4297,7 +4325,7 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/local/status":
             return self.send_json(local_status())
         if path == "/api/config":
-            return self.send_json(config_response(workbench_config()))
+            return self.send_json(config_response(workbench_config(), trusted_system=get_runtime_system_status()))
         if path == "/api/browser/status":
             return self.send_json(BROWSER.status())
         if path == "/api/platform/status":
@@ -4410,7 +4438,7 @@ class AppHandler(BaseHTTPRequestHandler):
             values = DB.settings()
             values["image.has_api_key"] = bool(get_secret())
             values["_deprecated"] = True
-            values["_config"] = config_response(workbench_config())["config"]
+            values["_config"] = config_response(workbench_config(), trusted_system=get_runtime_system_status())["config"]
             values["_warnings"] = [{"field": "/api/settings", "message": "/api/settings已弃用，后续请使用/api/config", "reason": "/api/settings已弃用，后续请使用/api/config", "value": "", "allowed": "/api/config"}]
             return self.send_json(values)
         if path == "/api/automation/preflight":
@@ -4838,28 +4866,31 @@ class AppHandler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             values = dict(payload)
             api_key = values.pop("image.api_key", "")
-            if api_key:
-                set_secret(api_key)
-            settings_patch = self.settings_payload_to_config_patch(values)
-            if settings_patch:
-                config = update_config(DATA_DIR, settings_patch, "user")
+            try:
+                settings_patch = self.settings_payload_to_config_patch(values)
+                advanced_patch = self.settings_payload_to_advanced_config_patch(values)
+                box_recipe = values.get("automation.miaoshou_box_recipe")
+                if box_recipe is not None:
+                    AUTOMATION.ensure_publish_allowed(box_recipe, "妙手采集箱安全配方")
+                recipe = values.get("automation.publish_recipe")
+                if recipe is not None:
+                    AUTOMATION.ensure_publish_allowed(recipe, "发布动作配方")
+                direct_settings = legacy_settings_direct_payload(values)
+                if api_key:
+                    set_secret(api_key)
+                if settings_patch:
+                    config = update_config(DATA_DIR, settings_patch, "user")
+                    sync_settings_from_config(config)
+                if advanced_patch:
+                    config = update_config(DATA_DIR, advanced_patch, "advanced")
+                    sync_settings_from_config(config)
+                if direct_settings:
+                    DB.set_settings(direct_settings)
+                config = workbench_config()
                 sync_settings_from_config(config)
-            advanced_patch = self.settings_payload_to_advanced_config_patch(values)
-            if advanced_patch:
-                config = update_config(DATA_DIR, advanced_patch, "advanced")
-                sync_settings_from_config(config)
-            box_recipe = values.get("automation.miaoshou_box_recipe")
-            if box_recipe is not None:
-                AUTOMATION.ensure_publish_allowed(box_recipe, "妙手采集箱安全配方")
-            recipe = values.get("automation.publish_recipe")
-            if recipe is not None:
-                AUTOMATION.ensure_publish_allowed(recipe, "发布动作配方")
-            direct_settings = legacy_settings_direct_payload(values)
-            if direct_settings:
-                DB.set_settings(direct_settings)
-            config = workbench_config()
-            sync_settings_from_config(config)
-            return self.send_json({"ok": True, "deprecated": True, "config": config_response(config)["config"], "warnings": [{"field": "/api/settings", "message": "/api/settings已弃用，后续请使用/api/config", "reason": "/api/settings已弃用，后续请使用/api/config", "value": "", "allowed": "/api/config"}]})
+                return self.send_json({"ok": True, "deprecated": True, "config": config_response(config, trusted_system=get_runtime_system_status())["config"], "warnings": [{"field": "/api/settings", "message": "/api/settings已弃用，后续请使用/api/config", "reason": "/api/settings已弃用，后续请使用/api/config", "value": "", "allowed": "/api/config"}]})
+            except ConfigValidationError as exc:
+                return self.send_json(config_error_response(exc.errors, exc.warnings), HTTPStatus.BAD_REQUEST)
 
         if path == "/api/automation/launch":
             return self.send_json(BROWSER.start())
@@ -4880,13 +4911,51 @@ class AppHandler(BaseHTTPRequestHandler):
                 values = values.get(section)
             config = update_config(DATA_DIR, values or {}, section)
             sync_settings_from_config(config)
-            return self.send_json(config_response(config))
+            return self.send_json(config_response(config, trusted_system=get_runtime_system_status()))
         except ConfigValidationError as exc:
             return self.send_json(config_error_response(exc.errors, exc.warnings), HTTPStatus.BAD_REQUEST)
         except RuntimeError as exc:
             return self.send_json(config_error_response([{"field": "settings", "reason": str(exc), "message": str(exc), "value": "", "allowed": "settings兼容同步成功"}]), HTTPStatus.INTERNAL_SERVER_ERROR)
         except ValueError as exc:
             return self.send_json(config_error_response([{"field": "config", "reason": str(exc), "message": str(exc), "value": "", "allowed": ""}]), HTTPStatus.BAD_REQUEST)
+
+    @staticmethod
+    def settings_target_margin_to_config(value):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ConfigValidationError("旧利润率配置无效", [{
+                "field": "market.target_margin_pct",
+                "reason": "必须是数字百分比",
+                "message": "必须是数字百分比",
+                "value": value,
+                "allowed": "0 至 100，例如 20 表示 20%",
+            }])
+        if isinstance(value, bool):
+            raise ConfigValidationError("旧利润率配置无效", [{
+                "field": "market.target_margin_pct",
+                "reason": "必须是数字百分比，不能使用布尔值",
+                "message": "必须是数字百分比，不能使用布尔值",
+                "value": value,
+                "allowed": "0 至 100，例如 20 表示 20%",
+            }])
+        try:
+            parsed = float(str(value).strip() if isinstance(value, str) else value)
+        except (TypeError, ValueError):
+            raise ConfigValidationError("旧利润率配置无效", [{
+                "field": "market.target_margin_pct",
+                "reason": "必须是数字百分比",
+                "message": "必须是数字百分比",
+                "value": value,
+                "allowed": "0 至 100，例如 20 表示 20%",
+            }])
+        if parsed < 0 or parsed > 100:
+            raise ConfigValidationError("旧利润率配置无效", [{
+                "field": "market.target_margin_pct",
+                "reason": "超出允许范围",
+                "message": "超出允许范围",
+                "value": value,
+                "allowed": "0 至 100，例如 20 表示 20%",
+            }])
+        return parsed / 100
 
     @staticmethod
     def settings_payload_to_config_patch(values):
@@ -4918,7 +4987,7 @@ class AppHandler(BaseHTTPRequestHandler):
         elif values.get("automation.mode") in ("live", "collect_to_box"):
             patch["run_mode"] = "collect_to_box"
         if "market.target_margin_pct" in values:
-            patch["minimum_profit_margin"] = float(values["market.target_margin_pct"]) / 100
+            patch["minimum_profit_margin"] = AppHandler.settings_target_margin_to_config(values["market.target_margin_pct"])
         return patch
 
     @staticmethod

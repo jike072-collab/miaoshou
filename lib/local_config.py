@@ -245,6 +245,45 @@ def _canonical_default():
     return config
 
 
+def _persistent_config(config):
+    """Return the on-disk shape. Runtime system status is never persisted."""
+    config = config or {}
+    return {
+        "version": config.get("version", CONFIG_VERSION),
+        "user": deepcopy(config.get("user") or DEFAULT_CONFIG["user"]),
+        "advanced": deepcopy(config.get("advanced") or DEFAULT_CONFIG["advanced"]),
+    }
+
+
+def _has_non_persistent_config_keys(payload):
+    if not isinstance(payload, dict):
+        return False
+    return any(key not in ("version", "user", "advanced") for key in payload)
+
+
+def _safe_runtime_system(trusted_system=None):
+    system = {
+        key: DEFAULT_CONFIG["system"].get(key)
+        for key in SAFE_SYSTEM_FIELDS
+    }
+    system.update({
+        key: _current_system_defaults().get(key, system.get(key))
+        for key in SAFE_SYSTEM_FIELDS
+    })
+    if isinstance(trusted_system, dict):
+        for key in SAFE_SYSTEM_FIELDS:
+            if key in trusted_system:
+                system[key] = trusted_system.get(key)
+    _redact_sensitive_mapping(system)
+    return system
+
+
+def merge_runtime_system(config, trusted_status=None):
+    merged = deepcopy(config or {})
+    merged["system"] = _safe_runtime_system(trusted_status)
+    return merged
+
+
 def ensure_local_runtime(data_dir):
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -252,10 +291,10 @@ def ensure_local_runtime(data_dir):
         (data_dir / name).mkdir(parents=True, exist_ok=True)
     example = config_example_path(data_dir)
     if not example.exists():
-        write_json(example, DEFAULT_CONFIG)
+        write_json(example, _persistent_config(DEFAULT_CONFIG))
     config = config_path(data_dir)
     if not config.exists():
-        shutil.copyfile(example, config)
+        write_json(config, _persistent_config(DEFAULT_CONFIG))
     if not token_path(data_dir).exists():
         token_path(data_dir).write_text(secrets.token_urlsafe(32), encoding="utf-8")
     return config
@@ -921,12 +960,12 @@ def _validation_error_message(result):
     return "配置校验失败：%s" % _format_issue(result["errors"][0])
 
 
-def config_response(config, warnings=None, deprecated=False):
+def config_response(config, warnings=None, deprecated=False, trusted_system=None):
     response_warnings = warnings if warnings is not None else config.get("_configWarnings", [])
     response_errors = config.get("_configErrors", [])
     return {
         "ok": True,
-        "config": export_safe_config(config),
+        "config": export_safe_config(config, trusted_system=trusted_system),
         "warnings": [_public_issue(item) for item in response_warnings],
         "errors": [_public_issue(item) for item in response_errors],
         "deprecated": bool(deprecated),
@@ -951,7 +990,7 @@ def save_config(data_dir, values):
     if not result["valid"]:
         raise ConfigValidationError(_validation_error_message(result), result["errors"], result["warnings"])
     normalized = result["normalized_config"]
-    _atomic_write_json(config_path(data_dir), normalized)
+    _atomic_write_json(config_path(data_dir), _persistent_config(normalized))
     return _legacy_view(normalized, result["warnings"])
 
 
@@ -1114,7 +1153,7 @@ def migrate_config_file(data_dir, settings=None, force=False):
                         "normalized_config": merged_result["normalized_config"],
                         "backup_path": backup,
                     }
-                _atomic_write_json(path, merged_result["normalized_config"])
+                _atomic_write_json(path, _persistent_config(merged_result["normalized_config"]))
                 return {
                     "migrated": True,
                     "source_version": "settings",
@@ -1126,6 +1165,19 @@ def migrate_config_file(data_dir, settings=None, force=False):
                     "backup_path": backup,
                 }
         result = validate_config(payload)
+        if _has_non_persistent_config_keys(payload) and result["valid"]:
+            backup = backup or backup_config_for_migration(data_dir, path)
+            _atomic_write_json(path, _persistent_config(result["normalized_config"]))
+            return {
+                "migrated": True,
+                "source_version": payload.get("version"),
+                "target_version": CONFIG_VERSION,
+                "changed_fields": ["persistent_shape"],
+                "ignored_fields": ["system"] if "system" in payload else [],
+                "warnings": warnings + result["warnings"] + [_issue("config.json", "已移除非持久化配置字段，system 改为运行时检测返回", sorted([key for key in payload if key not in ("version", "user", "advanced")]), "version/user/advanced")],
+                "normalized_config": result["normalized_config"],
+                "backup_path": backup,
+            }
         return {
             "migrated": False,
             "source_version": payload.get("version"),
@@ -1152,7 +1204,7 @@ def migrate_config_file(data_dir, settings=None, force=False):
                 "normalized_config": result["normalized_config"],
                 "backup_path": backup,
             }
-        _atomic_write_json(path, result["normalized_config"])
+        _atomic_write_json(path, _persistent_config(result["normalized_config"]))
         return {
             "migrated": True,
             "source_version": payload.get("version"),
@@ -1178,7 +1230,7 @@ def migrate_config_file(data_dir, settings=None, force=False):
             "normalized_config": merge_result["normalized_config"],
             "backup_path": backup,
         }
-    _atomic_write_json(path, merge_result["normalized_config"])
+    _atomic_write_json(path, _persistent_config(merge_result["normalized_config"]))
     changed = []
     ignored = []
     for report in merge_result.get("migration_reports", []):
@@ -1200,11 +1252,11 @@ def reset_config(data_dir=None):
     data_dir = Path(data_dir or _default_data_dir())
     ensure_local_runtime(data_dir)
     config = _canonical_default()
-    _atomic_write_json(config_path(data_dir), config)
+    _atomic_write_json(config_path(data_dir), _persistent_config(config))
     return _legacy_view(config)
 
 
-def export_safe_config(config=None):
+def export_safe_config(config=None, trusted_system=None):
     config = config or load_config()
     validation = validate_config(config)
     safe = deepcopy(validation["normalized_config"])
@@ -1214,8 +1266,7 @@ def export_safe_config(config=None):
             advanced[key] = "<local-path>"
     for section in ("user", "advanced", "system"):
         _redact_sensitive_mapping(safe.get(section, {}))
-    system = safe.get("system") if isinstance(safe.get("system"), dict) else {}
-    safe["system"] = {key: system.get(key, DEFAULT_CONFIG["system"].get(key)) for key in SAFE_SYSTEM_FIELDS}
+    safe["system"] = _safe_runtime_system(trusted_system)
     safe.pop("legacy", None)
     return safe
 

@@ -25,16 +25,14 @@ cp data/config.example.json data/config.json
 ```json
 {
   "version": 1,
-  "documentation": "docs/module-01/config-model.md",
   "user": {},
-  "advanced": {},
-  "system": {}
+  "advanced": {}
 }
 ```
 
 - `user`：普通用户可编辑的最小任务配置。
 - `advanced`：高级配置和安全开关，默认值即可运行模拟模式。
-- `system`：系统检测结果，只读，不接受普通保存接口写入。
+- `system`：不写入配置文件；由后端环境检测在 `/api/config` 返回时合并，只读，不接受普通保存接口写入。
 
 ## 普通字段
 
@@ -113,9 +111,9 @@ cp data/config.example.json data/config.json
 | `plugin_detected` | 自动检测 | 妙手插件状态 |
 | `last_environment_check_at` | 自动检测 | 最近检测时间 |
 
-普通保存接口和高级保存接口都不能修改 `system.*`。
+普通保存接口和高级保存接口都不能修改 `system.*`，`data/config.json` 也不会持久化 `system`。
 
-`/api/config` 只返回安全 system 字段：`platform`、`python_version`、`chrome_detected`、`cdp_available`、`alibaba_logged_in`、`miaoshou_logged_in`、`plugin_detected`、`last_environment_check_at`。完整本机路径、Cookie、token、密码和 API Key 不会返回。
+`/api/config` 通过后端可信环境检测合并运行态，只返回安全 system 字段：`platform`、`python_version`、`chrome_detected`、`cdp_available`、`alibaba_logged_in`、`miaoshou_logged_in`、`plugin_detected`、`last_environment_check_at`。完整本机路径、Cookie、token、密码和 API Key 不会返回。
 
 ## 运行模式
 

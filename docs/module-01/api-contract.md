@@ -8,6 +8,7 @@
 - 唯一读取入口：`lib/local_config.py::load_config()` / `get_config()`
 - 唯一保存入口：`lib/local_config.py::update_config()` / `save_config()`
 - 安全导出入口：`lib/local_config.py::export_safe_config()`
+- 运行态 system 来源：`app.py::get_runtime_system_status()`
 - settings 兼容镜像：`app.py::sync_settings_from_config()`
 - 启动迁移入口：`app.py::initialize()` 调用 `migrate_config_file(DATA_DIR, settings=DB.settings())`
 
@@ -35,7 +36,7 @@
 说明：
 
 - 返回值由 `config_response(workbench_config())` 生成。
-- `config` 经过 `export_safe_config()` 脱敏。
+- `config` 经过 `export_safe_config(..., trusted_system=get_runtime_system_status())` 脱敏；`data/config.json` 不持久化 `system`。
 - `system` 只返回安全白名单字段：`platform`、`python_version`、`chrome_detected`、`cdp_available`、`alibaba_logged_in`、`miaoshou_logged_in`、`plugin_detected`、`last_environment_check_at`。
 - 本机路径字段返回 `<local-path>`。
 - `api_key`、`token`、`cookie`、`password`、`secret` 等字段不会返回明文。
@@ -209,6 +210,8 @@
 | `image.retries` | `advanced.step_retry_count` |
 | `market.target_margin_pct` | `user.minimum_profit_margin` |
 
+`market.target_margin_pct` 必须是 0 至 100 的数字百分比，例如 `20` 表示 20%，会转换为 `user.minimum_profit_margin=0.2`。非法字符串、空字符串或 `null` 返回 400，字段为 `market.target_margin_pct`，不会写入 `config.json` 或 settings。
+
 ## 启动初始化
 
 `initialize()` 执行：
@@ -231,5 +234,5 @@
 
 - 尚未替换所有旧业务模块中的 `DB.setting()` 读取。
 - `/api/settings` 仍然存在，用于旧页面和旧业务兼容。
-- `system` 检测结果不可通过普通/高级配置 API 修改，当前仅安全导出白名单字段。
+- `system` 检测结果不可通过普通/高级配置 API 修改，当前仅从后端可信检测函数合并并安全导出白名单字段。
 - 发布、铺货、五国版本等旧功能仍在代码中，模块1不删除。

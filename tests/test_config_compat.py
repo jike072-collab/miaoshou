@@ -7,7 +7,19 @@ from unittest.mock import patch
 
 import app
 from lib.database import Database
-from lib.local_config import config_error_response, config_response, load_config, save_config, update_config
+from lib.local_config import ConfigValidationError, config_error_response, config_response, load_config, save_config, update_config
+
+
+RUNTIME_SYSTEM = {
+    "platform": "Darwin",
+    "python_version": "3.11.9",
+    "chrome_detected": True,
+    "cdp_available": True,
+    "alibaba_logged_in": True,
+    "miaoshou_logged_in": True,
+    "plugin_detected": True,
+    "last_environment_check_at": "2026-06-18T10:00:00Z",
+}
 
 
 class ConfigCompatibilityTest(unittest.TestCase):
@@ -138,29 +150,32 @@ class ConfigCompatibilityTest(unittest.TestCase):
         self.assertTrue(updated["_configWarnings"])
 
     def test_config_api_saves_user_values_and_returns_safe_config(self):
-        response = self.handler().route_post("/api/config", {
-            "values": {
-                "category": "凉鞋",
-                "keywords": ["凉鞋", "凉鞋", ""],
-                "target_count": 5,
-                "candidate_limit": 20,
-                "run_mode": "simulation",
-            }
-        })
+        with patch("app.get_runtime_system_status", return_value=RUNTIME_SYSTEM):
+            response = self.handler().route_post("/api/config", {
+                "values": {
+                    "category": "凉鞋",
+                    "keywords": ["凉鞋", "凉鞋", ""],
+                    "target_count": 5,
+                    "candidate_limit": 20,
+                    "run_mode": "simulation",
+                }
+            })
 
         payload = response["payload"]
         self.assertEqual(response["status"], HTTPStatus.OK)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["config"]["user"]["category"], "凉鞋")
         self.assertEqual(payload["config"]["user"]["keywords"], ["凉鞋"])
-        self.assertIn("platform", payload["config"]["system"])
+        self.assertTrue(payload["config"]["system"]["chrome_detected"])
+        self.assertTrue(payload["config"]["system"]["plugin_detected"])
         self.assertEqual(app.DB.setting("automation.mode"), "dry_run")
 
     def test_config_get_api_returns_safe_config_shape(self):
         handler = self.handler()
         handler.path = "/api/config"
 
-        response = handler.do_GET()
+        with patch("app.get_runtime_system_status", return_value=RUNTIME_SYSTEM):
+            response = handler.do_GET()
 
         payload = response["payload"]
         self.assertEqual(response["status"], HTTPStatus.OK)
@@ -168,7 +183,31 @@ class ConfigCompatibilityTest(unittest.TestCase):
         self.assertEqual(payload["config"]["version"], 1)
         self.assertIn("user", payload["config"])
         self.assertIn("advanced", payload["config"])
-        self.assertIn("platform", payload["config"]["system"])
+        self.assertTrue(payload["config"]["system"]["chrome_detected"])
+        self.assertTrue(payload["config"]["system"]["alibaba_logged_in"])
+        self.assertTrue(payload["config"]["system"]["miaoshou_logged_in"])
+
+    def test_config_api_ignores_submitted_system_and_preserves_runtime_status(self):
+        save_config(self.root, {"keywords": ["鞋"], "target_count": 5})
+
+        with patch("app.get_runtime_system_status", return_value=RUNTIME_SYSTEM):
+            response = self.handler().route_post("/api/config", {
+                "values": {
+                    "target_count": 6,
+                    "system": {
+                        "chrome_detected": False,
+                        "token": "client-token",
+                    },
+                },
+            })
+
+        payload = response["payload"]
+        saved = json.loads((self.root / "config.json").read_text(encoding="utf-8"))
+        self.assertEqual(response["status"], HTTPStatus.OK)
+        self.assertEqual(load_config(self.root)["user"]["target_count"], 6)
+        self.assertTrue(payload["config"]["system"]["chrome_detected"])
+        self.assertNotIn("token", payload["config"]["system"])
+        self.assertNotIn("system", saved)
 
     def test_config_api_rejects_invalid_user_config_without_writing(self):
         save_config(self.root, {"keywords": ["鞋"], "target_count": 5})
@@ -197,14 +236,16 @@ class ConfigCompatibilityTest(unittest.TestCase):
     def test_advanced_config_api_updates_only_advanced_values(self):
         save_config(self.root, {"keywords": ["鞋"], "target_count": 5})
 
-        response = self.handler().route_post("/api/config/advanced", {
-            "values": {"cdp_port": 9444, "system": {"platform": "bad"}},
-        })
+        with patch("app.get_runtime_system_status", return_value=RUNTIME_SYSTEM):
+            response = self.handler().route_post("/api/config/advanced", {
+                "values": {"cdp_port": 9444, "system": {"platform": "bad"}},
+            })
 
         self.assertEqual(response["status"], HTTPStatus.OK)
         self.assertEqual(load_config(self.root)["advanced"]["cdp_port"], 9444)
         self.assertEqual(app.DB.setting("automation.cdp_port"), 9444)
         self.assertNotEqual(load_config(self.root)["system"]["platform"], "bad")
+        self.assertEqual(response["payload"]["config"]["system"]["platform"], "Darwin")
 
     def test_advanced_config_api_rejects_core_safety_disable_without_sync(self):
         save_config(self.root, {"keywords": ["鞋"], "target_count": 5})
@@ -253,6 +294,49 @@ class ConfigCompatibilityTest(unittest.TestCase):
         self.assertEqual(app.DB.setting("automation.cdp_port"), 9555)
         self.assertEqual(app.DB.setting("automation.chrome_profile_dir"), "data/old-profile")
         self.assertEqual(app.DB.setting("image.timeout"), 77)
+
+    def test_settings_payload_converts_legacy_margin_percent(self):
+        self.assertEqual(app.AppHandler.settings_payload_to_config_patch({"market.target_margin_pct": "20"})["minimum_profit_margin"], 0.2)
+        self.assertEqual(app.AppHandler.settings_payload_to_config_patch({"market.target_margin_pct": 20})["minimum_profit_margin"], 0.2)
+
+    def test_settings_payload_rejects_invalid_legacy_margin(self):
+        for value in ("abc", "", None):
+            with self.subTest(value=value):
+                with self.assertRaises(ConfigValidationError) as ctx:
+                    app.AppHandler.settings_payload_to_config_patch({"market.target_margin_pct": value})
+
+                self.assertEqual(ctx.exception.errors[0]["field"], "market.target_margin_pct")
+
+    def test_settings_api_rejects_invalid_margin_without_partial_save(self):
+        for value in ("abc", "", None):
+            with self.subTest(value=value):
+                save_config(self.root, {"keywords": ["运动鞋"], "category": "鞋类", "target_count": 5})
+                app.DB.set_settings({"market.target_margin_pct": 22, "automation.mode": "dry_run"})
+                before_config = (self.root / "config.json").read_text(encoding="utf-8")
+                before_settings = app.DB.settings()
+
+                response = self.handler().route_post("/api/settings", {
+                    "category": "凉鞋",
+                    "market.target_margin_pct": value,
+                    "automation.mode": "collect_to_box",
+                })
+
+                self.assertEqual(response["status"], HTTPStatus.BAD_REQUEST)
+                self.assertFalse(response["payload"]["ok"])
+                self.assertEqual(response["payload"]["errors"][0]["field"], "market.target_margin_pct")
+                self.assertEqual((self.root / "config.json").read_text(encoding="utf-8"), before_config)
+                self.assertEqual(app.DB.settings(), before_settings)
+
+    def test_settings_api_saves_valid_margin_percent(self):
+        save_config(self.root, {"keywords": ["运动鞋"], "category": "鞋类", "target_count": 5})
+
+        response = self.handler().route_post("/api/settings", {
+            "market.target_margin_pct": "20",
+        })
+
+        self.assertEqual(response["status"], HTTPStatus.OK)
+        self.assertEqual(load_config(self.root)["user"]["minimum_profit_margin"], 0.2)
+        self.assertEqual(app.DB.setting("market.target_margin_pct"), 20.0)
 
 
 if __name__ == "__main__":

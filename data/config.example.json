@@ -51,16 +51,5 @@
     "enable_miaoshou_collect": true,
     "per_run_item_limit": 10,
     "per_keyword_page_limit": 2
-  },
-  "system": {
-    "platform": "",
-    "python_version": "",
-    "chrome_detected": false,
-    "chrome_path_detected": "",
-    "cdp_available": false,
-    "alibaba_logged_in": false,
-    "miaoshou_logged_in": false,
-    "plugin_detected": false,
-    "last_environment_check_at": ""
   }
 }

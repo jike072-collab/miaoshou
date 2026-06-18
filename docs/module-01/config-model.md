@@ -12,7 +12,7 @@
 - `validate_config(config)`
 - `reset_config(data_dir=None)`
 - `migrate_legacy_config(values)`
-- `export_safe_config(config=None)`
+- `export_safe_config(config=None, trusted_system=None)`
 
 本阶段为了兼容旧代码，`load_config()` 返回分层配置，同时附带旧字段别名，例如 `keywords`、`max_items_per_run`、`chrome_debug_port`、`no_publish`。
 
@@ -23,14 +23,12 @@
 ```json
 {
   "version": 1,
-  "documentation": "docs/module-01/config-model.md",
   "user": {},
-  "advanced": {},
-  "system": {}
+  "advanced": {}
 }
 ```
 
-`data/config.example.json` 与 `DEFAULT_CONFIG` 保持同结构。真实 `data/config.json` 属于本机数据，继续由 `.gitignore` 忽略。
+`data/config.example.json` 与真实 `data/config.json` 只包含可持久化字段：`version`、`user`、`advanced`。`system` 是运行时检测结果，只在 API 安全导出时由后端可信检测函数合并。真实 `data/config.json` 属于本机数据，继续由 `.gitignore` 忽略。
 
 ## 普通配置
 
@@ -87,9 +85,9 @@
 - `plugin_detected`
 - `last_environment_check_at`
 
-普通 `save_config()` 不采用用户传入的 `system` 值，避免把登录态、检测态或本机状态当作用户配置保存。
+普通 `save_config()` 不采用用户传入的 `system` 值，也不会把 `system` 写入 `data/config.json`，避免把登录态、检测态或本机状态当作用户配置保存。
 
-API 只安全导出 `platform`、`python_version`、`chrome_detected`、`cdp_available`、`alibaba_logged_in`、`miaoshou_logged_in`、`plugin_detected`、`last_environment_check_at`。完整 Chrome 路径、浏览器 Profile、Cookie、token、密码和 API Key 不返回。
+API 返回配置时通过 `app.py::get_runtime_system_status()` 合并可信运行状态，只安全导出 `platform`、`python_version`、`chrome_detected`、`cdp_available`、`alibaba_logged_in`、`miaoshou_logged_in`、`plugin_detected`、`last_environment_check_at`。完整 Chrome 路径、浏览器 Profile、Cookie、token、密码和 API Key 不返回。
 
 ## 校验与恢复
 
